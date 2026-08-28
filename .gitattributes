@@ -1,0 +1,31 @@
+# Finales de línea. Sin este archivo, git veía 25 archivos modificados y
+# 3.868 líneas cambiadas cuando lo único distinto era CRLF frente a LF:
+# el LICENSE aparecía reescrito entero sin que nadie lo tocara. Con
+# historiales así no se puede revisar nada, y en cada commit se pierde la
+# información de qué cambió de verdad.
+#
+# La regla: DENTRO del repositorio todo va en LF, que es lo que espera el
+# runner de Ubuntu donde corre la secuencia diaria. En tu disco Windows,
+# git lo entrega como corresponda a cada tipo.
+
+* text=auto eol=lf
+
+# PowerShell, en cambio, se guarda con CRLF en el disco. Windows lo
+# prefiere, y estos archivos solo se ejecutan ahí.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# El .env nunca entra al repositorio (está en .gitignore), pero si algún
+# día se añadiera una plantilla, que vaya en LF como el resto.
+*.env text eol=lf
+
+# Binarios: git no debe tocarlos ni intentar diferenciarlos por líneas.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.xlsx binary
+*.pptx binary
+*.docx binary
+*.parquet binary
