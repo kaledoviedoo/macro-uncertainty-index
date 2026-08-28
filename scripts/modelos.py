@@ -23,7 +23,7 @@ import unicodedata
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class Canal(str, Enum):
@@ -210,6 +210,113 @@ def normalizar(bruto: dict) -> dict:
     if "es_relevante" not in out:
         out["es_relevante"] = bool(imps)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Validación IMPACTO POR IMPACTO.
+#
+# Antes se validaba el objeto entero con `Extraccion.model_validate()`, y
+# Pydantic es todo-o-nada: un `canal` fuera del enum en el tercer impacto
+# invalidaba los otros dos, aunque estuvieran perfectos.
+#
+# El 2026-08-28 eso descartó el discurso de Jackson Hole entero —el documento
+# más relevante del lote— por un solo campo, y se perdieron 4 de 13 impactos
+# propuestos sin que ninguno fuera falso: solo mal etiquetado.
+#
+# Un documento no es una unidad de verdad. Es una lista de afirmaciones
+# independientes, y cada una se acepta o se rechaza por su cuenta.
+# ---------------------------------------------------------------------------
+def _motivo(exc: ValidationError, crudo: dict) -> str:
+    """
+    Describe el fallo CON EL VALOR que lo causó.
+
+    Sin el valor, un rechazo por enum es un callejón sin salida: no se sabe
+    si el modelo escribió una barbaridad o un sinónimo razonable que solo
+    falta en `_ALIAS_VALOR`. Con el valor delante, la decisión es de un
+    vistazo.
+    """
+    partes = []
+    for e in exc.errors()[:3]:
+        campo = ".".join(str(x) for x in e["loc"]) if e["loc"] else "?"
+        valor = crudo.get(e["loc"][0]) if e["loc"] else None
+        if isinstance(valor, str) and len(valor) > 45:
+            valor = valor[:45] + "…"
+        partes.append(f"{campo}=«{valor}» ({e['msg'][:55]})")
+    return "; ".join(partes)
+
+
+def validar_por_partes(bruto: dict) -> tuple[Extraccion, list[str]]:
+    """
+    Valida el envoltorio y CADA impacto por separado.
+
+    Devuelve la extracción con los impactos que sobrevivieron y la lista de
+    motivos de los que no. Nunca lanza: un documento mal formado devuelve
+    una extracción vacía, no una excepción que se lleve por delante el resto.
+    """
+    datos = normalizar(bruto)
+    crudos = [c for c in (datos.pop("impactos", None) or []) if isinstance(c, dict)]
+
+    try:
+        ext = Extraccion.model_validate({**datos, "impactos": []})
+    except ValidationError:
+        # Ni el envoltorio vale. Se conserva lo mínimo para poder seguir
+        # examinando los impactos, que es donde está el contenido.
+        ext = Extraccion(resumen=str(datos.get("resumen") or "")[:600],
+                         es_relevante=bool(crudos), impactos=[])
+
+    rechazos: list[str] = []
+    for i, c in enumerate(crudos[:12]):
+        try:
+            ext.impactos.append(Impacto.model_validate(c))
+        except ValidationError as exc:
+            etiqueta = str(c.get("ticker") or f"impacto {i}")
+            rechazos.append(f"{etiqueta}: {_motivo(exc, c)}")
+
+    if ext.impactos:
+        ext.es_relevante = True
+    return ext, rechazos
+
+
+# ---------------------------------------------------------------------------
+# Detector de abanico: ¿esto es análisis o es rellenar una tabla?
+# ---------------------------------------------------------------------------
+# Un documento PUEDE afectar de verdad a varios activos —una decisión de tipos
+# mueve medio mercado— y en ese caso los factores salen distintos, porque cada
+# activo tiene su propia exposición. Lo que delata el relleno no es que haya
+# muchos impactos: es que sean una escalera.
+#
+# El detector anterior exigía valores IDÉNTICOS (`len(firmas) == 1`) y por eso
+# no saltó nunca. El modelo no copia y pega, gradúa. El 2026-08-28 un titular
+# del FT sobre bonos convertibles produjo NVDA x1.15/20d, AAPL x1.12/30d,
+# MSFT x1.18/40d, ^NDX x1.14/25d y ^GSPC x1.13/35d: cinco activos, un canal,
+# ninguna cola y todos los factores dentro de 0,06. Pasó entero.
+#
+# Lo que se mide ahora es la DISPERSIÓN, no la igualdad.
+ABANICO_MIN = 3
+ABANICO_DISPERSION = 0.10
+
+# Un titular no es un documento. El FT entra como nivel 3 y llega sin cuerpo:
+# la cita se verifica contra ~80 caracteres, así que "sin cita no hay fila" se
+# cumple trivialmente y deja de ser una garantía. De un titular se sostiene UNA
+# afirmación —la que el titular hace—, no cinco.
+MIN_CUERPO_PARA_VARIOS = 600
+
+
+def detectar_abanico(filas: list[dict]) -> tuple[bool, str]:
+    """¿Mismo canal, misma cola y factores casi iguales? Entonces es relleno."""
+    if len(filas) < ABANICO_MIN:
+        return False, ""
+    if len({f["canal"] for f in filas}) > 1:
+        return False, ""
+    if len({f["cola"] for f in filas}) > 1:
+        return False, ""
+
+    fs = [float(f["factor_incert"]) for f in filas]
+    disp = max(fs) - min(fs)
+    if disp >= ABANICO_DISPERSION:
+        return False, ""
+    return True, (f"{len(filas)} impactos · un canal ({filas[0]['canal']}) · "
+                  f"una cola ({filas[0]['cola']}) · factores en {disp:.2f}")
 
 
 # ---------------------------------------------------------------------------

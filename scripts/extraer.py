@@ -11,15 +11,23 @@ consume buena parte de ese minuto. Poner esto en la ruta de la búsqueda del
 usuario significaría 5-10 segundos de espera y la cuota agotada en una
 tarde. El dashboard solo lee SQL.
 
-Los tres filtros, en orden:
+Los filtros, en orden:
 
-  1. PYDANTIC. Si el JSON no encaja en el esquema, la fila no existe.
+  1. PYDANTIC, IMPACTO A IMPACTO. Si una fila no encaja en el esquema, se
+     cae ella sola. Antes se validaba el documento entero y un solo campo
+     mal etiquetado se llevaba por delante a sus vecinos sanos.
   2. COHERENCIA. Reglas que un modelo rompe aunque el JSON valide:
      cola 'ninguna' con intensidad, factor 1.0 que no aporta nada.
   3. LA CITA. Se comprueba que la frase aparece LITERALMENTE en el
      documento. Este es el filtro que importa: un LLM inventa una cita
      con la misma fluidez con la que inventa un análisis, y comprobarlo
      es un `in` de Python, no una pregunta al modelo.
+  4. ABANICO Y TITULAR. Los tres anteriores miran cada fila por separado y
+     por eso no ven el patrón: cinco activos distintos, un solo canal y los
+     factores en escalera. Eso no es análisis, es rellenar una tabla; y un
+     titular sin cuerpo no sostiene cinco afirmaciones. Estas filas NO se
+     borran: se marcan y se apartan de la predicción, porque hay que
+     conservarlas para poder medir si de verdad aciertan menos.
 
     python scripts/extraer.py --limite 20
     python scripts/extraer.py --limite 5 --seco     # sin escribir
@@ -40,7 +48,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import requests
 
 from comun import RAIZ, cargar_entorno, conectar, log
-from modelos import Extraccion, coherente, normalizar, verificar_cita
+from modelos import (MIN_CUERPO_PARA_VARIOS, coherente, detectar_abanico,
+                     validar_por_partes, verificar_cita)
 from prompts import PROMPT_VER, construir
 
 # Límites de la capa gratuita, respetados por diseño y no por suerte.
@@ -215,7 +224,8 @@ def llamar(sistema: str, usuario: str) -> dict | None:
 # ---------------------------------------------------------------------------
 def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
     """Devuelve un recuento de lo que pasó con esta noticia."""
-    cuenta = {"propuestos": 0, "esquema": 0, "coherencia": 0, "cita": 0, "escritos": 0}
+    cuenta = {"propuestos": 0, "esquema": 0, "coherencia": 0, "cita": 0,
+              "apartados": 0, "escritos": 0}
 
     sistema, usuario = construir(activos, noticia)
     bruto = llamar(sistema, usuario)
@@ -226,15 +236,16 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
     # Se traducen los sinónimos ANTES de validar. Un modelo que devuelve
     # `impacts` en vez de `impactos` no está equivocándose en el contenido,
     # solo en el idioma del campo. Lo sustantivo se sigue validando igual.
-    try:
-        ext = Extraccion.model_validate(normalizar(bruto))
-    except Exception as exc:
-        print(f"      esquema inválido: {str(exc)[:160]}")
-        print(f"      claves recibidas: {list(bruto)[:8]}")
-        cuenta["esquema"] = len(bruto.get("impactos") or bruto.get("impacts") or [])
-        return cuenta
-
-    cuenta["propuestos"] = len(ext.impactos)
+    #
+    # Cada impacto se valida solo. Un `canal` fuera del enum tumba SU fila,
+    # no las de al lado. Y el motivo se imprime con el valor que lo causó,
+    # que es lo que permite distinguir una barbaridad de un sinónimo que
+    # solo falta en el mapa de alias.
+    ext, rechazos = validar_por_partes(bruto)
+    for r in rechazos:
+        print(f"      esquema: {r}")
+    cuenta["esquema"] += len(rechazos)
+    cuenta["propuestos"] = len(ext.impactos) + len(rechazos)
     if not ext.es_relevante or not ext.impactos:
         print(f"      sin impactos  ·  {ext.resumen[:60]}")
         if not seco:
@@ -280,19 +291,45 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
         print(f"      {imp.ticker:<11} x{imp.factor_incert:.2f} {flecha} "
               f"{imp.canal.value:<18} {imp.horizonte_d:>3}d  conf {imp.confianza:.2f}")
 
-    # Tanda uniforme: tres o más impactos con factor, horizonte y cola
-    # idénticos. No se descarta, se marca — la fase 6 dirá si estas filas
-    # aciertan menos que las diferenciadas, que es la sospecha.
-    if len(filas) >= 3:
-        firmas = {(f["factor_incert"], f["horizonte_d"], f["cola"]) for f in filas}
-        if len(firmas) == 1:
-            for f in filas:
-                f["lote_uniforme"] = True
-            print(f"      AVISO: {len(filas)} impactos con valores idénticos."
-                  f" Marcados como lote uniforme.")
-
+    # -----------------------------------------------------------------
+    # Filtro 4: el patrón del documento, no la fila.
+    #
+    # Marcar en vez de borrar es deliberado. Si se borran, la sospecha se
+    # vuelve indemostrable: nunca sabríamos si estas filas acertaban. Al
+    # marcarlas se quedan en la base para el marcador y, mientras tanto,
+    # `predecir.py` las ignora — no ensanchan ninguna distribución hasta
+    # que los datos digan que se lo han ganado.
+    # -----------------------------------------------------------------
     for f in filas:
         f["long_documento"] = len(documento)
+        f["lote_uniforme"] = False
+
+    es_abanico, detalle = detectar_abanico(filas)
+
+    if es_abanico:
+        # Todo el grupo cae: si el patrón es de relleno, ninguna de sus
+        # filas merece más crédito que las otras. Elegir una sería fingir
+        # un criterio que el detector no tiene.
+        apartar, motivo = filas, f"abanico · {detalle}"
+
+    elif len(documento) < MIN_CUERPO_PARA_VARIOS and len(filas) > 1:
+        # Un titular sin cuerpo no sostiene varias afirmaciones. Se conserva
+        # la de mayor confianza —la propia jerarquía del modelo— y el resto
+        # se aparta. No es una regla sobre la verdad de cada fila, es sobre
+        # cuánta evidencia cabe en ochenta caracteres.
+        filas.sort(key=lambda f: f["confianza"], reverse=True)
+        apartar = filas[1:]
+        motivo = (f"titular de {len(documento)} car. con {len(filas)} "
+                  f"impactos · se conserva {filas[0]['ticker']}")
+    else:
+        apartar, motivo = [], ""
+
+    for f in apartar:
+        f["lote_uniforme"] = True
+    cuenta["apartados"] += len(apartar)
+
+    if motivo:
+        print(f"      APARTADO de la predicción ({len(apartar)}) · {motivo}")
 
     if filas and not seco:
         try:
@@ -356,7 +393,8 @@ def main() -> None:
           f"{'   [SECO: no escribe]' if a.seco else ''}")
     print(f"{'='*72}")
 
-    tot = {"propuestos": 0, "esquema": 0, "coherencia": 0, "cita": 0, "escritos": 0}
+    tot = {"propuestos": 0, "esquema": 0, "coherencia": 0, "cita": 0,
+           "apartados": 0, "escritos": 0}
     for i, n in enumerate(noticias, 1):
         f = fuentes.get(n["fuente_id"], {})
         n["fuente_nombre"] = f.get("nombre", "?")
@@ -375,12 +413,22 @@ def main() -> None:
     print(f"  Rechazados por incoherencia         {tot['coherencia']:>4}")
     print(f"  RECHAZADOS POR CITA INVENTADA       {tot['cita']:>4}")
     print(f"  Escritos en la base                 {tot['escritos']:>4}")
+    print(f"    de ellos, apartados por relleno   {tot['apartados']:>4}"
+          f"   (guardados, fuera de la predicción)")
 
     if tot["propuestos"]:
         tasa = tot["cita"] / tot["propuestos"] * 100
         print(f"\n  Tasa de citas inventadas: {tasa:.0f} %")
         print("  Vigílala entre versiones del prompt. Si sube, el modelo está")
         print("  rellenando huecos; si baja, el encargo está mejor planteado.")
+
+    if tot["escritos"]:
+        relleno = tot["apartados"] / tot["escritos"] * 100
+        print(f"\n  Tasa de relleno: {relleno:.0f} %")
+        print("  Cuántas de las filas con cita verificada resultaron ser")
+        print("  abanico o titular estirado. La cita puede ser real y la")
+        print("  atribución un invento: son dos fallos distintos y hasta")
+        print("  hoy solo se medía el primero.")
     print("\n  Nada de esto es una predicción todavía. Son hipótesis con")
     print("  cita verificada, y valdrán algo cuando superen a `VIX > p80`.\n")
 

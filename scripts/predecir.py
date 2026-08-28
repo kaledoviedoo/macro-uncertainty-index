@@ -56,10 +56,24 @@ def ajuste_llm(sb, ticker: str, horizonte: int) -> tuple[float, float, int]:
 
     Ambos se ponderan por la confianza declarada, y solo entran impactos
     con cita verificada cuyo horizonte no haya vencido.
+
+    Y NO entran los marcados como `lote_uniforme`: abanicos y titulares
+    estirados. Esas filas tienen la cita verificada —la frase existe— pero
+    la atribución es relleno, y ensanchar una distribución real con ellas
+    es peor que no tener noticia ninguna. Se quedan escritas en la base
+    para que el marcador pueda decir si esta decisión fue correcta; lo que
+    no hacen es mover un pronóstico mientras tanto.
     """
     filas = (sb.table("impactos")
              .select("factor_incert,cola,intensidad_cola,confianza,horizonte_d,creado_en")
              .eq("ticker", ticker).eq("cita_verificada", True)
+             # `is.null` va incluido a propósito: las filas escritas antes de
+             # que existiera la columna la tienen a NULL, y en SQL
+             # `NULL = false` no es cierto sino desconocido. Con un `eq` a
+             # secas, todo el historial anterior desaparecería del pronóstico
+             # sin que nada avisara. Es el mismo fallo silencioso que el tope
+             # de 1.000 filas de PostgREST: no da error, da menos datos.
+             .or_("lote_uniforme.is.null,lote_uniforme.eq.false")
              .gte("horizonte_d", horizonte)
              .order("creado_en", desc=True).limit(40).execute().data)
     if not filas:
