@@ -33,9 +33,28 @@ def main() -> None:
     salud.sort(key=lambda r: (r["dias_de_retraso"] is None,
                               -(r["dias_de_retraso"] or 0)))
 
+    # El retraso solo significa algo comparado con la frecuencia de la serie.
+    # Una mensual publicada en julio lleva 28 días de retraso el 28 de agosto
+    # y está perfectamente al día; con el umbral diario salía "rezagado" cada
+    # mes. Una alarma que suena siempre es una alarma que se deja de mirar, y
+    # entonces tapa a la de al lado que sí importa.
+    UMBRALES = {                 # frecuencia: (al día hasta, rezagado hasta)
+        "diaria":   (4, 35),
+        "semanal":  (10, 45),
+        "mensual":  (45, 75),
+        "trimestral": (135, 200),
+    }
+    frecuencias = {a["ticker"]: (a.get("frecuencia") or "diaria")
+                   for a in sb.table("activos").select("ticker,frecuencia")
+                             .execute().data}
+
     print(f"  {'TICKER':<12}{'ÚLTIMO DATO':<14}{'RETRASO':>9}{'FILAS':>9}  ESTADO")
     for r in salud:
         retraso = r["dias_de_retraso"]
+        frec = frecuencias.get(r["ticker"], "diaria")
+        al_dia, rezagado = UMBRALES.get(frec, UMBRALES["diaria"])
+        sufijo = "" if frec == "diaria" else f" ({frec})"
+
         if retraso is None:
             marca, txt = "SIN DATOS", "—"
         elif retraso < 0:
@@ -43,12 +62,12 @@ def main() -> None:
             # hoy rige hasta el próximo día hábil. No es un error, es su
             # convención, y conviene que se lea como tal en vez de como -2d.
             marca, txt = "al día (fecha de vigencia)", f"+{-retraso}d"
-        elif retraso <= 4:
-            marca, txt = "al día", f"{retraso}d"
-        elif retraso <= 35:
-            marca, txt = "rezagado", f"{retraso}d"
+        elif retraso <= al_dia:
+            marca, txt = f"al día{sufijo}", f"{retraso}d"
+        elif retraso <= rezagado:
+            marca, txt = f"rezagado{sufijo}", f"{retraso}d"
         else:
-            marca, txt = "PARADO", f"{retraso}d"
+            marca, txt = f"PARADO{sufijo}", f"{retraso}d"
         print(f"  {r['ticker']:<12}{str(r['ultimo_precio'] or '—'):<14}"
               f"{txt:>9}{r['filas_totales']:>9,}  {marca}")
 
@@ -115,9 +134,16 @@ def main() -> None:
     titulo("MARCADOR DEL MOTOR")
     marcador = sb.table("v_precision_por_metodo").select("*").execute().data
     if not marcador:
-        print("  Todavía no hay predicciones resueltas.")
-        print("  Es lo normal en fase 2: llega en la fase 6, y es el número")
-        print("  que decide si este sistema sirve o solo suena convincente.")
+        abiertas = (sb.table("predicciones").select("id", count="exact")
+                    .is_("resuelta_en", "null").limit(1).execute())
+        n = getattr(abiertas, "count", None) or 0
+        print(f"  Todavía no hay predicciones resueltas. {n} abiertas.")
+        print("  Se cobran a 5 días hábiles: hasta que la ventana no cierre,")
+        print("  `resolver.py` se niega a puntuarlas. Negarse es correcto —")
+        print("  resolver con datos incompletos infla el marcador solo.")
+        print("\n  Este número es el que decide si el motor sirve o solo")
+        print("  suena convincente. Hasta que exista, todo lo demás es")
+        print("  fontanería.")
     else:
         print(f"  {'MÉTODO':<22}{'HORIZ':>6}{'RESUELTAS':>11}{'ACIERTO':>9}")
         for m in marcador:

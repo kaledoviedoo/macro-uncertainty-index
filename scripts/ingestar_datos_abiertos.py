@@ -1,14 +1,21 @@
 """
 ingestar_datos_abiertos.py — Series desde datos.gov.co (Socrata).
 
-El SDMX del Banco de la República no publica el año en curso en frecuencia
-diaria: el flujo `_HIST` cierra en diciembre del año anterior y el `_LATEST`
-trae una sola observación, la de hoy. Entre ambos queda un hueco de meses.
+CORRECCIÓN (2026-08-28). Este archivo nació de un diagnóstico equivocado.
+Decía que el SDMX de Banrep no publicaba el año en curso, y no era cierto: sí
+lo publica. Lo que cortaba la serie en diciembre era nuestro propio
+`endPeriod`. Está explicado en `ingestar_banrep.py`, función `pedir_datos`.
 
-El portal de datos abiertos sí tiene las series completas y al día:
+Aun así el archivo se queda, por dos razones. La TRM vive aquí desde entonces,
+funciona y no hay motivo para moverla. Y tener una segunda fuente para las
+series colombianas es sano: el día que Banrep cambie algo, se nota comparando.
 
-    TRM   32sa-8pi3   8.331 filas desde 1991-12-02
-    IBR   ev8i-uzwt   (esquema por explorar)
+    TRM   32sa-8pi3   8.336 filas desde 1991-12-02   al día
+
+    IBR   ev8i-uzwt   NO SIRVE. Devuelve HTTP 403 «no row or column access to
+                      non-tabular tables»: es una página de presentación, no
+                      un dataset consultable. No perder tiempo con él — el
+                      IBR estaba completo en el SDMX desde el principio.
 
 Uso:
     python scripts/ingestar_datos_abiertos.py             # explora, no escribe

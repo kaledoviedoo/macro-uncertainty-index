@@ -15,6 +15,12 @@ Series cargadas hoy:
     IBR     Interbancaria overnight      diaria    DF_IBR_DAILY_HIST
     COLCAP  Índice accionario            mensual   DF_COLCAP_MONTHLY_HIST
 
+CUIDADO CON EL FILTRO DE FECHAS. `endPeriod=2026` no significa "hasta el
+final de 2026": Banrep lo toma como el instante inicial del año y devuelve la
+serie cortada en 2025-12-31, con un 200 y sin avisar. Ocho meses de CBR e IBR
+estuvieron ausentes por eso, y el hueco se le achacaba a Banrep. Ver la nota
+en `pedir_datos`, que ahora elige la variante por FRESCURA y no por orden.
+
 Uso:
     python scripts/ingestar_banrep.py                    # explora, no escribe
     python scripts/ingestar_banrep.py --escribir
@@ -155,14 +161,15 @@ def descargar(flujo: str, desde: int) -> dict[Clave, list[tuple[str, float]]]:
     """
     Trae el flujo histórico y, si existe, el de últimos datos, y los fusiona.
 
-    Banrep parte cada serie en dos: `_HIST` cierra en el último año completo
-    y `_LATEST` cubre el actual. Pedir solo el histórico deja la serie
-    congelada en diciembre pasado — que es exactamente lo que pasó con la TRM.
+    Se creyó mucho tiempo que `_HIST` cerraba en el último año completo y que
+    por eso hacía falta el `_LATEST`. Es FALSO: `_HIST` llega hasta hoy, y lo
+    que lo cortaba en diciembre era nuestro propio `endPeriod`. Ver la nota
+    larga en `pedir_datos`.
+
+    La fusión se conserva igual porque sigue siendo barata y correcta: el
+    `_LATEST` no estorba, y probar varios nombres protege de que Banrep
+    renombre un flujo. Lo que ya no hace es tapar un fallo nuestro.
     """
-    # El _HIST cierra en el último año completo y el _LATEST trae UN solo
-    # dato: el de hoy. Entre ambos queda el año en curso sin cubrir. El
-    # catálogo también publica flujos con el nombre base (DF_TRM, DF_IBR),
-    # que son los candidatos naturales para rellenar ese tramo.
     base = flujo
     for sufijo in ("_DAILY_HIST", "_MONTHLY_HIST", "_HIST"):
         if base.upper().endswith(sufijo):
@@ -178,11 +185,10 @@ def descargar(flujo: str, desde: int) -> dict[Clave, list[tuple[str, float]]]:
 
     fusion: dict[Clave, dict[str, float]] = {}
     for f in candidatos:
-        r, usada = pedir_datos(f, desde)
-        if r is None:
+        grupos, usada = pedir_datos(f, desde)
+        if not grupos:
             print(f"      {f}: sin respuesta con ninguna variante de URL")
             continue
-        grupos = _parsear(r.content)
         n = sum(len(v) for v in grupos.values())
         print(f"      {f}: {n:,} observaciones en {len(grupos)} serie(s)   [{usada}]")
         # El LATEST se aplica después y pisa al HIST donde se solapen.
@@ -192,33 +198,88 @@ def descargar(flujo: str, desde: int) -> dict[Clave, list[tuple[str, float]]]:
     return {k: sorted(v.items()) for k, v in fusion.items()}
 
 
-def pedir_datos(flujo: str, desde: int) -> tuple[requests.Response | None, str]:
-    """
-    Prueba varias formas de pedir el mismo flujo hasta que una responda.
+# Cuánto puede retrasarse una serie antes de sospechar de nuestra petición y
+# no del emisor. Generoso a propósito: hay festivos, puentes y series que se
+# publican con días de demora. Lo que esto detecta no es un retraso de días,
+# es un corte de MESES.
+MAX_REZAGO_DIAS = 45
 
-    Los flujos `_LATEST` diarios devuelven 404 con la URL que sí funciona para
-    los `_HIST` y para el COLCAP mensual. No hay documentación que explique la
-    diferencia, así que en vez de adivinar se prueban las variantes plausibles
-    —sin filtro de fechas, sin versión fija, sin agencia— y se informa de cuál
-    funcionó, para poder fijarla después.
+
+def _fecha_maxima(grupos: dict[Clave, list[tuple[str, float]]]) -> str | None:
+    """La observación más reciente de todo el flujo, ya normalizada."""
+    fechas = [normalizar_fecha(p) for obs in grupos.values() for p, _ in obs]
+    fechas = [f for f in fechas if f]
+    return max(fechas) if fechas else None
+
+
+def pedir_datos(flujo: str, desde: int
+                ) -> tuple[dict[Clave, list[tuple[str, float]]], str]:
+    """
+    Prueba varias formas de pedir el mismo flujo y se queda con la que trae
+    los datos MÁS RECIENTES, no con la primera que conteste.
+
+    ESTE ERA EL FALLO. La variante con fechas iba primera y respondía siempre,
+    así que ganaba la carrera — pero `endPeriod=2026` Banrep lo interpreta
+    como el instante INICIAL de 2026, no el final, y devolvía la serie cortada
+    en 2025-12-31. La misma URL sin filtro devuelve hasta hoy.
+
+    Medido el 2026-08-28 contra el mismo servidor, el mismo día:
+
+        DF_CBR_DAILY_HIST  con fechas    5.844 obs   hasta 2025-12-31
+        DF_CBR_DAILY_HIST  sin fechas   10.424 obs   hasta 2026-08-28
+        DF_IBR_DAILY_HIST  con fechas   25.580 obs   hasta 2025-12-31
+        DF_IBR_DAILY_HIST  sin fechas   27.816 obs   hasta 2026-08-28
+
+    Durante meses el aviso de hueco culpó a Banrep de no publicar el año en
+    curso. Publicaba. Éramos nosotros los que pedíamos mal, y el servidor
+    contestaba 200 con menos datos: ni un error, ni un aviso. El mismo tipo de
+    fallo silencioso que el tope de 1.000 filas de PostgREST.
+
+    Por eso ahora no basta con que una variante responda: tiene que traer algo
+    reciente. Si la primera ya lo hace —que es el caso normal— se para ahí y
+    cuesta lo mismo que antes. Si no, sigue probando y se queda con la menos
+    rezagada, diciendo en voz alta cuál descartó y por qué.
     """
     cola = "dimensionAtObservation=TIME_PERIOD&detail=full"
     periodos = f"startPeriod={desde}&endPeriod={date.today().year}&"
 
     variantes = [
-        ("v1.0 con fechas",  f"{AGENCIA},{flujo},1.0/all/ALL/?{periodos}{cola}"),
         ("v1.0 sin fechas",  f"{AGENCIA},{flujo},1.0/all/ALL/?{cola}"),
+        ("v1.0 con fechas",  f"{AGENCIA},{flujo},1.0/all/ALL/?{periodos}{cola}"),
         ("vlatest",          f"{AGENCIA},{flujo},latest/all/ALL/?{cola}"),
         ("sin version",      f"{AGENCIA},{flujo}/all/ALL/?{cola}"),
         ("agencia all",      f"all,{flujo},latest/all/ALL/?{cola}"),
         ("solo flujo",       f"{flujo}/all/ALL/?{cola}"),
     ]
 
+    hoy = date.today()
+    mejor: tuple[str, dict, str] | None = None
+
     for etiqueta, ruta in variantes:
         r = pedir(f"{BASE}/data/{ruta}", silencioso=True)
-        if r is not None:
-            return r, etiqueta
-    return None, ""
+        if r is None:
+            continue
+
+        grupos = _parsear(r.content)
+        if not grupos:
+            continue
+
+        fmax = _fecha_maxima(grupos)
+        if fmax is None:
+            continue
+
+        rezago = (hoy - date.fromisoformat(fmax)).days
+        if rezago <= MAX_REZAGO_DIAS:
+            return grupos, etiqueta
+
+        if mejor is None or fmax > mejor[0]:
+            mejor = (fmax, grupos, etiqueta)
+        print(f"      [{etiqueta}] solo llega a {fmax} ({rezago} días de "
+              f"rezago); probando otra variante")
+
+    if mejor:
+        return mejor[1], f"{mejor[2]} — la menos rezagada, hasta {mejor[0]}"
+    return {}, ""
 
 
 def normalizar_fecha(periodo: str) -> str | None:
