@@ -1,0 +1,100 @@
+# Secuencia nocturna del motor. Corre en las maquinas de GitHub, asi que
+# el portatil puede estar apagado.
+#
+# LA HORA. El cron de GitHub va en UTC. Las 19:30 de Bogota (UTC-5) son las
+# 00:30 UTC del dia siguiente, asi que para cubrir lunes-viernes de Bogota
+# hay que disparar martes-sabado en UTC. Ese desfase de dia es el error
+# clasico de los cron con zona horaria, y aqui esta puesto a proposito.
+#
+# GitHub no garantiza la puntualidad: en horas punta el arranque puede
+# retrasarse bastante. Da igual, no competimos por milisegundos.
+
+name: Secuencia diaria
+
+on:
+  schedule:
+    - cron: "30 0 * * 2-6"
+  workflow_dispatch:          # boton de "ejecutar ahora" en la pestana Actions
+
+# Si una ejecucion se alarga, la siguiente espera en vez de solaparse:
+# dos emisiones simultaneas escribirian la misma fila a la vez.
+concurrency:
+  group: secuencia-diaria
+  cancel-in-progress: false
+
+jobs:
+  ejecutar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY:    ${{ secrets.SUPABASE_ANON_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      GROQ_API_KEY:         ${{ secrets.GROQ_API_KEY }}
+      GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
+      PYTHONIOENCODING:     utf-8
+      # Sin .env en el runner: las claves viven solo en memoria del proceso.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Comprobar que hay claves antes de empezar
+        run: |
+          test -n "$SUPABASE_URL" || { echo "Falta el secret SUPABASE_URL"; exit 1; }
+          test -n "$SUPABASE_SERVICE_KEY" || { echo "Falta el secret SUPABASE_SERVICE_KEY"; exit 1; }
+          echo "Claves presentes."
+
+      # --- Pasos CRITICOS: si fallan, no se predice -------------------
+      - name: Precios y regimen
+        run: python scripts/ingestar_precios.py
+
+      # --- Pasos OPCIONALES: un fallo aqui no debe costar el dia ------
+      # Es peor perder una emision que perder unas noticias: el historial
+      # de predicciones es lo que no se puede reconstruir despues.
+      - name: Series del Banco de la Republica
+        continue-on-error: true
+        run: python scripts/ingestar_banrep.py --escribir
+
+      - name: TRM desde datos.gov.co
+        continue-on-error: true
+        run: python scripts/ingestar_datos_abiertos.py --escribir
+
+      - name: Noticias por RSS
+        continue-on-error: true
+        run: python scripts/ingestar_noticias.py
+
+      - name: Texto completo de las fuentes oficiales
+        continue-on-error: true
+        run: python scripts/enriquecer.py --limite 25
+
+      - name: Extraccion con LLM
+        continue-on-error: true
+        run: python scripts/extraer.py --limite 15
+
+      # --- Vuelta a lo CRITICO ----------------------------------------
+      - name: Emitir predicciones
+        run: python scripts/predecir.py
+
+      - name: Resolver vencidas y mostrar marcador
+        run: python scripts/resolver.py
+
+      - name: Guardar el marcador como resumen de la ejecucion
+        if: always()
+        run: |
+          {
+            echo '## Marcador'
+            echo '```'
+            python scripts/resolver.py --marcador 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
