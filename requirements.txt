@@ -1,0 +1,18 @@
+# Fase 1-2: base de datos e ingesta
+supabase>=2.10.0
+python-dotenv>=1.0.1
+yfinance>=1.6.0
+pandas>=2.2.0
+numpy>=1.26.0
+requests>=2.32.0
+feedparser>=6.0.11
+
+# Fase 3: la Terminal Óptica
+dash>=2.18.0
+plotly>=5.24.0
+
+# Fase 4-5: noticias, extracción estructurada y evaluación de caídas
+pydantic>=2.9.0
+scikit-learn>=1.5.0
+trafilatura>=1.12.0
+pdfplumber>=0.11.0

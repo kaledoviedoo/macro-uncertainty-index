@@ -1,0 +1,25 @@
+# Secretos — lo primero, antes del primer commit (H-08)
+.env
+.env.*
+!.env.example
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Datos locales y caché
+*.csv
+*.parquet
+.cache/
+data/
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
