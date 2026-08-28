@@ -1,4 +1,4 @@
-# Motor de Inferencia Financiero — Estado del proyecto
+# Motor de Inferencia Causal — Estado del proyecto
 
 **Qué es:** un sistema local que lee documentos oficiales de bancos centrales y
 gobiernos, los conecta con 25 activos financieros, y estima **cuánta
@@ -15,8 +15,8 @@ Esa distinción es el proyecto entero. Volvemos a ella al final.
 | **1** | Base de datos en la nube, esquema, universo de activos | ✅ Terminada |
 | **2** | Ingesta de precios, 10 años de histórico, régimen de mercado | ✅ Terminada |
 | **3** | La Terminal Óptica: buscador y gráfico | ✅ Terminada |
-| **4** | Ingesta de noticias por RSS | ✅ Código listo, sin ejecutar |
-| **5** | Extracción con LLM + calendario de eventos | ⏳ Código listo, falta API key |
+| **4** | Ingesta de noticias por RSS + texto completo | ✅ Terminada |
+| **5** | Extracción con LLM + calendario de eventos | ✅ Funcionando en seco |
 | **6** | Marcador: ¿el motor acierta? | 🔬 Línea base medida |
 | **7** | Búsqueda semántica y ampliación del universo | ⬜ Sin empezar |
 
@@ -63,6 +63,26 @@ peor que el silencio, con apariencia de funcionar.
 Las métricas reales son tres: **elevación** sobre la base, **cobertura** de las
 caídas, y **calibración** — cuando dice 18 %, ¿pasa el 18 % de las veces?
 
+### El extractor diferencia el signo por activo
+
+Sobre un artículo del FMI titulado *"AI to fuel global growth as investment
+spreads beyond US"*, el modelo devolvió:
+
+| Activo | Factor | Cola | Horizonte | Confianza |
+|---|---|---|---|---|
+| ^GSPC | 1,12 | ↓ | 30 d | 0,78 |
+| DX-Y.NYB | 1,10 | ↓ | 20 d | 0,75 |
+| **^STOXX50E** | **1,15** | **↑** | 30 d | 0,80 |
+
+Bolsa estadounidense y dólar a la baja, bolsa europea al alza, ante una
+noticia sobre crecimiento que se desplaza fuera de Estados Unidos. Es el
+razonamiento correcto, y salió de tres juicios distintos: tres factores,
+tres horizontes, dos direcciones. Dos versiones antes del prompt, ese mismo
+documento producía tres filas idénticas con `1.10 / izquierda`.
+
+**Citas inventadas: 0 %.** Cada fila lleva una frase literal del documento,
+verificada por código contra el texto original.
+
 ### El informe de empleo de EE.UU. mueve más al peso que al S&P 500
 
 | Activo | Factor en día de evento | p |
@@ -79,15 +99,19 @@ laboral estadounidense agita el peso colombiano un 53 % por encima de lo normal.
 
 ## 3. Qué falta
 
-**Inmediato — una API key.** Groq o Gemini, capa gratuita, en el `.env`. Sin
-ella la fase 5 no arranca. Es lo único que bloquea.
+**Inmediato — quitar el `--seco`.** El extractor funciona pero corre en modo
+prueba: procesa todo y no escribe. Una pasada sin esa bandera puebla el grafo
+de impactos por primera vez.
 
 **Corto plazo**
 
-- Ejecutar `ingestar_noticias.py` y `extraer.py` por primera vez
+- Automatizar la secuencia nocturna con el Programador de tareas de Windows
+- Emitir predicciones fechadas: sin una fila con fecha y hora no hay nada que
+  evaluar después, y esa es la fase 6
 - Importar los calendarios oficiales de FOMC, IPC y juntas del Banrep (hoy solo
   está el informe de empleo, derivado por regla)
-- Automatizar el lote nocturno con el Programador de tareas de Windows
+- Los 4 PDFs del Banco de Japón entran bien, pero algunos comunicados siguen
+  siendo tablas: revisar si el recorte a 12.000 caracteres corta lo importante
 
 **Medio plazo**
 
@@ -112,25 +136,29 @@ ella la fase 5 no arranca. Es lo único que bloquea.
 | Datos | **pandas · NumPy** | Manipulación de series temporales |
 | Modelos | **scikit-learn** | Regresión logística con validación walk-forward |
 | Validación | **Pydantic** | El contrato que el LLM debe cumplir |
-| Fuentes | **yfinance · SDMX · Socrata · RSS** | Cuatro protocolos distintos, un esquema |
+| Fuentes | **yfinance · SDMX · Socrata · RSS · GDELT** | Cinco protocolos distintos, un esquema |
+| Documentos | **trafilatura · pdfplumber** | El texto real detrás del titular, HTML y PDF |
 | Razonamiento | **Groq o Gemini** | Capa gratuita, en lote nocturno |
 | Seguridad | **RLS de PostgreSQL** | La app solo lee; escribir requiere otra clave |
 
 ### Cómo se ejecuta
 
+Todo pasa por `motor.ps1`, que resuelve solo la ruta del entorno virtual:
+
 ```powershell
 cd C:\Users\User\OneDrive\Desktop\finance
-$py = "C:\Users\User\.venvs\motor-causal\Scripts\python.exe"
 
-& $py scripts\estado.py                    # panel de control
-& $py app.py                               # la Terminal, en :8050
+.\motor.ps1                    # lista los comandos
+.\motor.ps1 estado             # panel de control
+.\motor.ps1 app                # la Terminal, en :8050
 
-& $py scripts\ingestar_precios.py          # diario
-& $py scripts\ingestar_noticias.py         # diario
-& $py scripts\extraer.py --limite 20       # nocturno, necesita API key
+.\motor.ps1 precios            # diario
+.\motor.ps1 noticias           # diario
+.\motor.ps1 enriquecer         # texto completo de las fuentes oficiales
+.\motor.ps1 extraer --limite 20
 
-& $py scripts\evaluar.py --todos           # marcador de señales
-& $py scripts\modelo_caidas.py             # validación fuera de muestra
+.\motor.ps1 senales            # marcador de señales
+.\motor.ps1 caidas             # validación fuera de muestra
 ```
 
 ---

@@ -60,6 +60,9 @@ $comandos = [ordered]@{
     "calibrar"   = @{ s = "scripts\calendario.py";              a = @("--calibrar");     d = "Mide el impacto historico de cada evento" }
     "senales"    = @{ s = "scripts\evaluar.py";                 a = @("--todos");        d = "Marcador de senales de caida, en muestra" }
     "caidas"     = @{ s = "scripts\modelo_caidas.py";           a = @();                 d = "Modelo de caidas validado fuera de muestra" }
+    "predecir"   = @{ s = "scripts\predecir.py";                a = @();                 d = "FASE 6: emite las predicciones fechadas de hoy" }
+    "resolver"   = @{ s = "scripts\resolver.py";                a = @();                 d = "FASE 6: cobra las vencidas y muestra el marcador" }
+    "marcador"   = @{ s = "scripts\resolver.py";                a = @("--marcador");     d = "Solo el marcador, sin resolver nada" }
 }
 
 if (-not $Comando -or -not $comandos.Contains($Comando)) {

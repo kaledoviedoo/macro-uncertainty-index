@@ -39,6 +39,8 @@ from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 
 from calendario import factores_por_dia
 from comun import conectar_lectura, leer_todo
+from pronostico import (ESTADOS, matriz_transicion, prob_caida, proyectar,
+                        retornos)
 
 # ---------------------------------------------------------------------------
 # Paleta, validada contra fondo negro para visión normal y las tres formas de
@@ -92,18 +94,10 @@ def cortar(s: pd.Series, dias: int) -> pd.Series:
     return s if s.empty else s[s.index >= (s.index.max() - pd.Timedelta(days=dias))]
 
 
-def retornos(s: pd.Series) -> pd.Series:
-    """
-    Retornos logarítmicos, saltándose los precios no positivos.
-
-    Hace falta por un dato que NO es un error: el 20 de abril de 2020 el
-    WTI cerró en −37,63 dólares. Fue real — los tenedores del contrato de
-    mayo pagaban por no recibir el barril. El logaritmo de un negativo no
-    existe, así que ese salto se marca como indefinido en vez de dejar que
-    pandas emita un NaN silencioso con un aviso por consola.
-    """
-    v = s.where(s > 0)
-    return np.log(v / v.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+# `retornos`, `proyectar` y la cadena de Markov viven ahora en
+# scripts/pronostico.py: el emisor de predicciones usa exactamente el
+# mismo motor. Dos copias del simulador acabarian divergiendo, y el
+# marcador estaria evaluando algo distinto de lo que se ve en pantalla.
 
 
 def romper_huecos(s: pd.Series, limite: int) -> pd.Series:
@@ -145,163 +139,8 @@ def correlacion_desfasada(a: pd.Series, b: pd.Series, max_lag: int = 5):
 
 
 # ---------------------------------------------------------------------------
-ESTADOS = ["normal", "estres", "shock"]
-TAU = 0.10          # desviación a priori de la deriva anual, en tanto por uno
+P_TRANS = matriz_transicion(REG_SERIE)
 
-
-def _matriz_transicion() -> np.ndarray:
-    """
-    Con qué probabilidad el mercado pasa de un régimen a otro mañana.
-
-    Importa porque los shocks se agrupan: un día de pánico casi nunca viene
-    solo. Una simulación que sortease el régimen de forma independiente
-    cada día borraría los tramos malos largos, que son justo los que hacen
-    daño en una cartera.
-    """
-    P = np.full((3, 3), 1 / 3)
-    if REG_SERIE.empty:
-        return P
-    idx = {e: i for i, e in enumerate(ESTADOS)}
-    v = [idx[e] for e in REG_SERIE.values if e in idx]
-    C = np.zeros((3, 3))
-    for a, b in zip(v, v[1:]):
-        C[a, b] += 1
-    for i in range(3):
-        if C[i].sum() > 0:
-            P[i] = C[i] / C[i].sum()
-    return P
-
-
-P_TRANS = _matriz_transicion()
-
-
-def proyectar(s: pd.Series, horizonte: int, semilla: int = 11,
-              factores_evento: np.ndarray | None = None,
-              modo_deriva: str = "cero"):
-    """
-    Espectro de trayectorias posibles, no una línea.
-
-    Qué cambió y por qué. La versión anterior estimaba la deriva usando SOLO
-    los días en régimen normal. Suena a tu idea —modelar la tendencia cuando
-    no hay guerra— pero es un sesgo grave: los días de shock son
-    abrumadoramente negativos, así que borrarlos equivale a pronosticar un
-    mundo donde las caídas no existen. Medido sobre tus datos, triplicaba la
-    deriva: el S&P 500 pasaba de 13,4 % a 44,5 % anual, y NVIDIA de 63,8 % a
-    176,2 %. De ahí que todo apuntara al cielo.
-
-    La forma correcta de expresar la misma idea no es BORRAR los shocks sino
-    MODELARLOS. Aquí:
-
-      1. Se estiman media y volatilidad de los retornos POR RÉGIMEN, sobre
-         todo el histórico, sin descartar nada.
-      2. Se simula el régimen futuro con una cadena de Markov estimada de la
-         propia tabla, que conserva la persistencia: los shocks se agrupan.
-      3. Se sortean 3.000 trayectorias y se leen sus percentiles.
-
-    Y sobre la deriva: se encoge hacia cero con un factor bayesiano
-    tau²/(tau²+ee²). El estimador de la media de retornos es notoriamente
-    ruidoso —en una prueba con deriva real del 10 % anual devolvió 23,5 %—
-    y el error estándar crece con la volatilidad, así que los activos más
-    volátiles se encogen más. Que es exactamente lo que deben hacer.
-    """
-    limpia = s.dropna()
-    if len(limpia) < 250 or horizonte <= 0:
-        return None
-
-    ret = retornos(limpia)
-    if ret.empty or ret.std() == 0:
-        return None
-
-    est = REG_SERIE.reindex(ret.index)
-    mu_r, sd_r = np.zeros(3), np.zeros(3)
-    for i, e in enumerate(ESTADOS):
-        sub = ret[est.values == e]
-        if len(sub) >= 20:
-            mu_r[i], sd_r[i] = sub.mean(), sub.std()
-        else:                       # régimen sin muestra propia: se usa el global
-            mu_r[i], sd_r[i] = ret.mean(), ret.std()
-
-    # Deriva. Por defecto, CERO.
-    #
-    # No es pereza ni pesimismo: es lo que dicen los datos de este propio
-    # proyecto. Las 24 series del universo tienen deriva histórica positiva,
-    # las 24 sin excepción. Eso no describe a los activos, describe a la
-    # ventana: 2016-2026 fue una década en la que subió casi todo.
-    # Extrapolarla es asumir que la década se repite.
-    #
-    # A horizontes de uno a seis meses el retorno pasado no predice al
-    # futuro, y el estimador es además pésimo: con deriva real del 10 %
-    # devolvió 23,5 % en una prueba controlada. Un martingala —el mejor
-    # pronóstico del precio de mañana es el de hoy— es la referencia
-    # honesta, y deja que la forma del abanico la marque el riesgo, que
-    # es lo único que sí sabemos estimar.
-    anios = len(ret) / 252
-    mu_anual = ret.mean() * 252
-    sd_anual = ret.std() * np.sqrt(252)
-    ee_anual = sd_anual / np.sqrt(anios)
-    peso = TAU ** 2 / (TAU ** 2 + ee_anual ** 2)
-    mu_objetivo = mu_anual * peso if modo_deriva == "historica" else 0.0
-
-    # Distribución estacionaria de la cadena, para saber cuánta deriva
-    # aporta la mezcla y corregirla al objetivo encogido.
-    vals, vecs = np.linalg.eig(P_TRANS.T)
-    pi = np.real(vecs[:, np.argmin(np.abs(vals - 1))])
-    pi = pi / pi.sum() if pi.sum() else np.full(3, 1 / 3)
-    mu_mezcla_anual = float(pi @ mu_r) * 252
-    mu_r = mu_r + (mu_objetivo - mu_mezcla_anual) / 252
-
-    # --- Simulación ---------------------------------------------------------
-    rng = np.random.default_rng(semilla)
-    n_sim = 3000
-    hoy = REG_SERIE.iloc[-1] if not REG_SERIE.empty else "normal"
-    estado = np.full(n_sim, ESTADOS.index(hoy) if hoy in ESTADOS else 0)
-    s0 = float(limpia.iloc[-1])
-    log_s = np.zeros(n_sim)
-    caminos = np.empty((horizonte, n_sim))
-    acum = np.zeros(3)
-
-    # El ensanchamiento por evento se aplica DENTRO del bucle, día a día.
-    # Inflar la banda entera daría una nube uniformemente ancha; aplicarlo
-    # solo el día del FOMC produce el escalón real: calma, salto, calma.
-    fe = (np.ones(horizonte) if factores_evento is None
-          else np.asarray(factores_evento, dtype=float)[:horizonte])
-    if len(fe) < horizonte:
-        fe = np.concatenate([fe, np.ones(horizonte - len(fe))])
-
-    for d in range(horizonte):
-        u = rng.random(n_sim)
-        cum = P_TRANS[estado].cumsum(axis=1)
-        estado = (u[:, None] > cum).sum(axis=1).clip(0, 2)
-        for i in range(3):
-            acum[i] += (estado == i).sum()
-        log_s += rng.normal(mu_r[estado], sd_r[estado] * fe[d])
-        caminos[d] = log_s
-
-    precios = s0 * np.exp(caminos)
-    pcts = np.percentile(precios, [5, 25, 50, 75, 95], axis=1)
-
-    return {
-        "fechas": pd.bdate_range(limpia.index[-1] + pd.Timedelta(days=1),
-                                 periods=horizonte),
-        "p05": pcts[0], "p25": pcts[1], "p50": pcts[2],
-        "p75": pcts[3], "p95": pcts[4],
-        "s0": s0,
-        "mu_bruta": (np.exp(mu_anual) - 1) * 100,
-        "mu_usada": (np.exp(mu_objetivo) - 1) * 100,
-        "encogimiento": peso,
-        "sigma_anual": sd_anual * 100,
-        "sd_por_regimen": sd_r * np.sqrt(252) * 100,
-        "mu_por_regimen": (np.exp(mu_r * 252) - 1) * 100,
-        "regimen_hoy": hoy,
-        "prob_shock": acum[2] / (n_sim * horizonte) * 100,
-        "n": len(ret),
-        "prob_subir": float((precios[-1] > s0).mean()) * 100,
-        "dias_con_evento": int((fe > 1.001).sum()),
-        "factor_evento_max": float(fe.max()),
-        "modo_deriva": modo_deriva,
-        "prob_caida_5": float((precios[-1] < s0 * 0.95).mean()) * 100,
-        "prob_caida_10": float((precios[-1] < s0 * 0.90).mean()) * 100,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +427,8 @@ def pintar(estado, comparaciones):
             fe = factores_por_dia(sb, t, futuras)
         except Exception:
             fe = None          # sin calendario cargado, se proyecta sin eventos
-        pr = proyectar(completa, horizonte, factores_evento=fe,
+        pr = proyectar(completa, horizonte, regimen=REG_SERIE, P=P_TRANS,
+                       factores_evento=fe,
                        modo_deriva=DERIVAS.get((estado or {}).get("deriva",
                                                                   "deriva cero"), "cero"))
     if pr:
@@ -679,8 +519,13 @@ def pintar(estado, comparaciones):
                   "  fechas que ya están publicadas."]
         L += ["",
               "RIESGO A LA BAJA",
-              f"  caer más de  5 %:  {pr['prob_caida_5']:.0f} %",
-              f"  caer más de 10 %:  {pr['prob_caida_10']:.0f} %",
+              # Por el MÍNIMO de cada trayectoria, no por su punto final:
+              # una caída que se recupera antes del vencimiento igual
+              # habría dolido. Es la misma definición que evalúa el
+              # marcador, y tienen que coincidir.
+              f"  tocar −3 % en algún momento:  {prob_caida(pr, 0.03)*100:.0f} %",
+              f"  tocar −5 %:                   {prob_caida(pr, 0.05)*100:.0f} %",
+              f"  tocar −10 %:                  {prob_caida(pr, 0.10)*100:.0f} %",
               "",
               "DERIVA",
               f"  observada   {pr['mu_bruta']:+.1f} % anual",

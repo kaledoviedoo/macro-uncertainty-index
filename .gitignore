@@ -18,6 +18,9 @@ env/
 .cache/
 data/
 
+# Registros de la secuencia nocturna: se regeneran solos y crecen sin fin
+logs/
+
 # Editores / SO
 .vscode/
 .idea/

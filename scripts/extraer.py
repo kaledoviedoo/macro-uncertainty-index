@@ -38,9 +38,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import requests
-from dotenv import load_dotenv
 
-from comun import RAIZ, conectar, log
+from comun import RAIZ, cargar_entorno, conectar, log
 from modelos import Extraccion, coherente, normalizar, verificar_cita
 from prompts import PROMPT_VER, construir
 
@@ -98,10 +97,11 @@ def proveedor(verboso: bool = False) -> tuple[str, str, str]:
     if _RESUELTO and not verboso:
         return _RESUELTO
 
-    # Cargar el .env AQUÍ y no confiar en que otro lo haya hecho. Antes solo
-    # lo cargaba conectar(), así que `--modelos` —que no toca la base de
-    # datos— se ejecutaba sin variables y juraba que no había claves.
-    load_dotenv(RAIZ / ".env", override=True)
+    # Cargar el entorno AQUÍ y no confiar en que otro lo haya hecho. Antes
+    # solo lo cargaba conectar(), así que `--modelos` —que no toca la base
+    # de datos— se ejecutaba sin variables y juraba que no había claves.
+    # En CI no hay .env y las claves llegan como variables de entorno.
+    cargar_entorno()
 
     def limpia(nombre: str) -> str:
         return (os.getenv(nombre) or "").strip().strip('"').strip("'")

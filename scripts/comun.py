@@ -63,19 +63,36 @@ def _describir_clave(clave: str) -> str | None:
     return None
 
 
-def conectar(silencioso: bool = False) -> Client:
+def cargar_entorno() -> None:
+    """
+    Carga el .env si existe; si no, se confía en las variables de entorno.
+
+    Esa segunda parte es lo que permite correr en GitHub Actions sin
+    escribir las claves en un archivo dentro del runner. En tu máquina
+    manda el .env; en el servidor mandan los secrets. Mismo código.
+    """
     env = RAIZ / ".env"
-    if not env.exists():
-        sys.exit(f"No encuentro el archivo .env en {RAIZ}")
-    load_dotenv(env, override=True)
+    if env.exists():
+        load_dotenv(env, override=True)
+
+
+def _falta(nombre: str) -> str:
+    origen = "el .env" if (RAIZ / ".env").exists() else "las variables de entorno"
+    return (f"Falta {nombre} en {origen}.\n"
+            f"  Local:  añádela a {RAIZ / '.env'}\n"
+            f"  CI:     defínela como secret del repositorio")
+
+
+def conectar(silencioso: bool = False) -> Client:
+    cargar_entorno()
 
     url = (os.getenv("SUPABASE_URL") or "").strip().strip('"').strip("'")
     clave = (os.getenv("SUPABASE_SERVICE_KEY") or "").strip().strip('"').strip("'")
 
     if not url:
-        sys.exit("Falta SUPABASE_URL en .env")
+        sys.exit(_falta("SUPABASE_URL"))
     if not clave or clave.startswith("pega_aqui"):
-        sys.exit("Falta SUPABASE_SERVICE_KEY en .env")
+        sys.exit(_falta("SUPABASE_SERVICE_KEY"))
 
     rol = _describir_clave(clave)
     if rol == "anon":
@@ -106,15 +123,13 @@ def conectar_lectura() -> Client:
     mira el proceso, lo peor que puede pasar es que lea datos de mercado.
     La clave de administrador no entra en el frontend.
     """
-    env = RAIZ / ".env"
-    if not env.exists():
-        sys.exit(f"No encuentro el archivo .env en {RAIZ}")
-    load_dotenv(env, override=True)
-
+    cargar_entorno()
     url = (os.getenv("SUPABASE_URL") or "").strip().strip('"').strip("'")
     clave = (os.getenv("SUPABASE_ANON_KEY") or "").strip().strip('"').strip("'")
-    if not url or not clave:
-        sys.exit("Faltan SUPABASE_URL o SUPABASE_ANON_KEY en .env")
+    if not url:
+        sys.exit(_falta("SUPABASE_URL"))
+    if not clave:
+        sys.exit(_falta("SUPABASE_ANON_KEY"))
     return create_client(url, clave)
 
 
