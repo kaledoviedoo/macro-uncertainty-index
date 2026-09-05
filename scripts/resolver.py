@@ -126,8 +126,61 @@ def resolver(sb) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Qué fracción de las predicciones se "marcan" al comparar métodos.
+#
+# Ninguno de los métodos avisa por su cuenta: los tres simulados declaran una
+# probabilidad y `regla_vix` declara su tasa histórica. Comparar aciertos sin
+# igualar cuánto marca cada uno es la trampa que ya nos salió una vez: se
+# enfrentó el p90 del modelo (10 % marcado) contra una regla que marcaba el
+# 20 %, y el modelo "ganaba" solo por ser más selectivo. Igualada la tasa,
+# perdió. Aquí se marca el mismo porcentaje para todos, siempre.
+TASA_DE_MARCADO = 0.20
+
+# Por debajo de esto no se publica ranking. No es prudencia: es que con dos
+# o tres eventos cualquier orden entre métodos es ruido, y una tabla ordenada
+# invita a leer un ganador donde no lo hay.
+MIN_EVENTOS_PARA_RANKING = 20
+
+
+def _leer_resueltas(sb) -> list[dict]:
+    """Todas las predicciones cerradas, paginando (PostgREST corta en 1.000)."""
+    filas, desde = [], 0
+    while True:
+        trozo = (sb.table("predicciones")
+                 .select("metodo,ticker,emitida_en,horizonte_d,prob_caida,"
+                         "umbral_caida,cayo,acertada,regimen_resol")
+                 .not_.is_("resuelta_el", "null")
+                 .order("emitida_en").range(desde, desde + 999).execute().data)
+        filas.extend(trozo)
+        if len(trozo) < 1000:
+            return filas
+        desde += 1000
+
+
 def marcador(sb) -> None:
-    filas = sb.table("v_marcador").select("*").execute().data
+    """
+    El marcador, calculado aquí y no en una vista.
+
+    ANTES SE LEÍA DE `v_marcador` Y MENTÍA. La vista agrupaba más fino que
+    por método —al parecer por ticker— pero el `print` solo sacaba el nombre
+    del método: dieciocho filas idénticas en la etiqueta, imposibles de
+    distinguir. La frecuencia base se tomaba de `grupo[0]` y se aplicaba a
+    las dieciocho. Y como esa base salió 0 %, la columna de elevación quedó
+    en `0.00x` para todo el mundo por construcción.
+
+    Peor todavía era el asterisco. Marcaba "mejor Brier que baseline_naive",
+    y en una semana sin una sola caída el Brier ordena por quién declaró el
+    número más bajo. Un método que dijera siempre 0 % los ganaba a todos. El
+    5 de septiembre de 2026 eso llenó la tabla de asteriscos que parecían
+    resultados y solo medían timidez.
+
+    Se calcula en Python por dos razones. La vista no está en `db/schema.sql`
+    —el archivo tiene la antigua `v_precision_por_metodo`—, así que nadie
+    podía leer cómo agrupaba sin conectarse a la base. Y porque cada número
+    de aquí necesita una definición escrita al lado, no enterrada en un SQL
+    que no viaja con el repositorio.
+    """
+    filas = _leer_resueltas(sb)
     if not filas:
         print(f"\n{'='*76}")
         print("  Todavía no hay predicciones resueltas.")
@@ -136,38 +189,134 @@ def marcador(sb) -> None:
         return
 
     print(f"\n{'='*76}\nMARCADOR\n{'='*76}")
+
     for h in sorted({f["horizonte_d"] for f in filas}):
         grupo = [f for f in filas if f["horizonte_d"] == h]
-        base = float(grupo[0]["frecuencia_base"] or 0)
-        print(f"\n  Horizonte {h} días   ·   frecuencia base {base*100:.1f} %")
-        print(f"  {'MÉTODO':<22}{'n':>6}{'prob.dice':>11}{'ocurrió':>10}"
-              f"{'avisos':>8}{'acierto':>9}{'elevac':>8}{'brier':>9}")
-        print(f"  {'-'*74}")
 
-        ref_brier = next((float(g["brier"]) for g in grupo
-                          if g["metodo"] == "baseline_naive"), None)
+        # La frecuencia base se mide sobre APUESTAS DISTINTAS, no sobre filas.
+        # Los cuatro métodos opinan sobre el mismo (ticker, día), así que
+        # contar filas multiplicaría por cuatro el mismo suceso y estrecharía
+        # cualquier intervalo de confianza a base de repetirse.
+        apuestas = {(f["ticker"], f["emitida_en"]): bool(f["cayo"]) for f in grupo}
+        eventos = sum(apuestas.values())
+        base = eventos / len(apuestas) if apuestas else 0.0
 
-        for g in sorted(grupo, key=lambda x: -(float(x["acierto_en_avisos"] or 0))):
-            ac = float(g["acierto_en_avisos"] or 0)
-            elev = ac / base if base else 0
-            brier = float(g["brier"] or 0)
-            mejor = ""
-            if ref_brier and g["metodo"] != "baseline_naive":
-                mejor = " *" if brier < ref_brier else ""
-            print(f"  {g['metodo']:<22}{g['resueltas']:>6}"
-                  f"{float(g['prob_media_declarada'] or 0)*100:>10.1f}%"
-                  f"{float(g['frecuencia_observada'] or 0)*100:>9.1f}%"
-                  f"{g['avisos']:>8}{ac*100:>8.1f}%{elev:>7.2f}x"
-                  f"{brier:>9.4f}{mejor}")
+        print(f"\n  Horizonte {h} días")
+        print(f"  {len(grupo)} filas   ·   {len(apuestas)} apuestas distintas"
+              f"   ·   {eventos} caídas   ·   frecuencia base {base*100:.1f} %")
 
-    print(f"\n  prob.dice = probabilidad media que declaró el método")
-    print(f"  ocurrió   = frecuencia real. Si difieren mucho, está mal calibrado.")
-    print(f"  elevac    = acierto en sus avisos, dividido por la frecuencia base")
-    print(f"  brier     = error cuadrático de la probabilidad. Menor es mejor.")
-    print(f"  *         = supera el Brier de baseline_naive")
-    print(f"\n  El listón: `regla_vix` da 2,08x de elevación con 41 % de cobertura")
-    print(f"  fuera de muestra. Un método que no le gane no entra en producción,")
-    print(f"  por muy convincentes que suenen sus cadenas causales.\n")
+        # ---- El guardián. Sin sucesos no hay nada que puntuar. -----------
+        if eventos < MIN_EVENTOS_PARA_RANKING:
+            fechas = sorted({f["emitida_en"] for f in grupo})
+            print(f"\n  SIN RANKING. Hacen falta {MIN_EVENTOS_PARA_RANKING} "
+                  f"caídas para ordenar métodos y hay {eventos}.")
+            print(f"  Emisiones cerradas: {fechas[0]} a {fechas[-1]} "
+                  f"({len(fechas)} días).")
+            print()
+            print("  Con tan pocos sucesos, cualquier orden entre métodos es")
+            print("  ruido. Y ordenar por Brier cuando casi nada ha ocurrido")
+            print("  premia al que declara la probabilidad más baja, no al que")
+            print("  acierta: un método mudo que dijera siempre 0 % ganaría.")
+            print()
+            print("  Lo único que se puede leer hoy es la calibración: si un")
+            print("  método declara 15 % y la frecuencia real es 2 %, sobra")
+            print("  incertidumbre en el modelo, y eso sí se ve con pocos datos.")
+            _tabla_calibracion(grupo, base)
+            continue
+
+        _tabla_ranking(grupo, base)
+
+    print(f"\n  El listón: `regla_vix` da 2,08x de elevación con 41 % de")
+    print(f"  cobertura fuera de muestra. Un método que no le gane no entra")
+    print(f"  en producción, por convincentes que suenen sus cadenas causales.\n")
+
+
+def _por_metodo(grupo: list[dict]) -> dict[str, list[dict]]:
+    d: dict[str, list[dict]] = {}
+    for f in grupo:
+        d.setdefault(f["metodo"], []).append(f)
+    return d
+
+
+def _tabla_calibracion(grupo: list[dict], base: float) -> None:
+    """Lo poco que se puede afirmar con pocos sucesos."""
+    print(f"\n  {'MÉTODO':<22}{'n':>5}{'declara':>10}{'ocurrió':>10}"
+          f"{'sesgo':>9}{'banda 80%':>11}")
+    print(f"  {'-'*67}")
+
+    for metodo, fs in sorted(_por_metodo(grupo).items()):
+        probs = [float(f["prob_caida"] or 0) for f in fs]
+        media = sum(probs) / len(probs)
+        real = sum(bool(f["cayo"]) for f in fs) / len(fs)
+
+        # Cobertura de la banda p10-p90: por construcción debería contener el
+        # resultado el 80 % de las veces. Es la única métrica que ya tiene
+        # sucesos suficientes, porque cada predicción la pone a prueba —
+        # ocurra una caída o no.
+        con_banda = [f for f in fs if f["acertada"] is not None]
+        cob = (sum(bool(f["acertada"]) for f in con_banda) / len(con_banda)
+               if con_banda else None)
+        txt_cob = f"{cob*100:>9.0f} %" if cob is not None else "        —"
+
+        print(f"  {metodo:<22}{len(fs):>5}{media*100:>9.1f}%{real*100:>9.1f}%"
+              f"{(media-real)*100:>+8.1f}p{txt_cob}")
+
+    print()
+    print("  declara   = probabilidad media que el método puso sobre la mesa")
+    print("  ocurrió   = frecuencia real de caídas en esas mismas apuestas")
+    print("  sesgo     = declara menos ocurrió. Positivo = exceso de miedo")
+    print("  banda 80% = cuántas veces el resultado cayó dentro de p10-p90.")
+    print("              Debería rondar el 80 %. Muy por encima, las bandas")
+    print("              son tan anchas que no dicen nada; muy por debajo,")
+    print("              el modelo subestima la cola.")
+
+
+def _tabla_ranking(grupo: list[dict], base: float) -> None:
+    """El marcador de verdad, cuando ya hay sucesos que repartir."""
+    print(f"\n  {'MÉTODO':<22}{'n':>5}{'declara':>9}{'brier':>9}"
+          f"{'marca':>7}{'acierta':>9}{'elevac':>8}{'banda':>8}")
+    print(f"  {'-'*77}")
+
+    resultados = []
+    for metodo, fs in _por_metodo(grupo).items():
+        probs = [float(f["prob_caida"] or 0) for f in fs]
+        cayos = [bool(f["cayo"]) for f in fs]
+        brier = sum((p - c) ** 2 for p, c in zip(probs, cayos)) / len(fs)
+
+        # Tasa de marcado IGUAL para todos: los k con mayor probabilidad.
+        k = max(1, int(round(len(fs) * TASA_DE_MARCADO)))
+        orden = sorted(zip(probs, cayos), key=lambda x: -x[0])[:k]
+        acierta = sum(c for _, c in orden) / k
+        elev = acierta / base if base else 0.0
+
+        # Un método que declara siempre lo mismo no puede discriminar: su
+        # "top 20 %" es un corte arbitrario entre valores idénticos.
+        plano = max(probs) - min(probs) < 1e-9
+
+        con_banda = [f for f in fs if f["acertada"] is not None]
+        cob = (sum(bool(f["acertada"]) for f in con_banda) / len(con_banda)
+               if con_banda else None)
+
+        resultados.append((metodo, len(fs), sum(probs) / len(fs), brier,
+                           k, acierta, elev, plano, cob))
+
+    for (m, n, media, brier, k, ac, elev, plano, cob) in sorted(
+            resultados, key=lambda r: -r[6]):
+        txt_elev = "     —" if plano else f"{elev:>6.2f}x"
+        txt_cob = f"{cob*100:>6.0f} %" if cob is not None else "      —"
+        print(f"  {m:<22}{n:>5}{media*100:>8.1f}%{brier:>9.4f}"
+              f"{k:>7}{ac*100:>8.1f}%{txt_elev}{txt_cob}")
+
+    print()
+    print(f"  marca   = las {TASA_DE_MARCADO*100:.0f} % con mayor probabilidad "
+          f"declarada. Igual para todos:")
+    print("            comparar aciertos sin igualar cuánto marca cada uno")
+    print("            hace ganar al más selectivo, no al que más sabe.")
+    print("  elevac  = acierta dividido por la frecuencia base. 1.00x = da")
+    print("            igual que marcar al azar. Es la cifra que decide.")
+    print("  brier   = error cuadrático medio de la probabilidad; menor mejor.")
+    print("            No ordena la tabla: con pocos sucesos premia al tímido.")
+    print("  —       = el método declara siempre lo mismo; no discrimina.")
 
 
 def main() -> None:

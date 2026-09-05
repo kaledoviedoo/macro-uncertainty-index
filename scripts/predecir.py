@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -112,6 +113,47 @@ def senal_vix(regimen_df: pd.DataFrame) -> tuple[bool, float]:
 
 
 # ---------------------------------------------------------------------------
+def fecha_de_mercado(sb, tickers: list[str]) -> date:
+    """
+    Con qué fecha se sella la predicción: la del CIERRE en que se basa.
+
+    Antes se usaba `date.today()`, y en el runner de GitHub eso es un
+    problema silencioso. La secuencia arranca a las 00:30 UTC, que son las
+    19:30 de Bogotá del día ANTERIOR, así que cada tanda quedaba fechada un
+    día por delante del mercado que la generó y las del viernes caían en
+    sábado. Una predicción fechada un día sin bolsa es una etiqueta que
+    miente sobre sí misma.
+
+    Peor: el 28 y el 29 de agosto de 2026 se emitieron dos tandas —una a
+    mano y otra por el cron— sobre el mismo cierre del viernes. La clave de
+    conflicto incluye `emitida_en`, así que no se pisaron: se duplicaron.
+    Ochenta apuestas contadas ciento sesenta veces en el marcador.
+
+    La fecha se deduce de los datos, no del reloj: se toma la MODA de los
+    últimos cierres disponibles. La moda y no el máximo porque la TRM se
+    publica con fecha de vigencia futura y el máximo la seguiría a ella; ni
+    el mínimo, porque las bolsas asiáticas van un día por detrás. Lo que
+    manda es la fecha en la que cerró la mayoría.
+    """
+    salud = sb.table("v_salud_ingesta").select("ticker,ultimo_precio").execute().data
+    objetivo = set(tickers)
+    cierres = [r["ultimo_precio"] for r in salud
+               if r["ticker"] in objetivo and r["ultimo_precio"]]
+    if not cierres:
+        # Sin datos de salud no se inventa nada: se avisa y se usa el reloj.
+        print("  AVISO: no pude deducir la fecha de mercado; uso la del sistema.")
+        return date.today()
+
+    fecha, votos = Counter(cierres).most_common(1)[0]
+    elegida = date.fromisoformat(str(fecha)[:10])
+
+    if elegida != date.today():
+        print(f"  Fecha de mercado: {elegida} "
+              f"({votos} de {len(cierres)} activos cerraron ese día; "
+              f"hoy en el servidor es {date.today()})")
+    return elegida
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Emisor de predicciones")
     ap.add_argument("--horizonte", type=int, default=5, help="días hábiles")
@@ -124,7 +166,6 @@ def main() -> None:
     a = ap.parse_args()
 
     sb = conectar()
-    hoy = date.today()
 
     reg = pd.DataFrame(leer_todo(sb, "regimenes_mercado",
                                  "fecha,estado,vix_cierre", orden="fecha"))
@@ -147,6 +188,8 @@ def main() -> None:
                .in_("tipo", list(TIPOS_OBJETIVO)).execute().data)
     if a.solo:
         activos = [x for x in activos if x["ticker"] == a.solo.upper()]
+
+    hoy = fecha_de_mercado(sb, [x["ticker"] for x in activos])
 
     criterio = (f"caída > {a.umbral:.1f} % (absoluto)" if a.umbral
                 else f"caída > {a.sigmas:.1f} sigma del propio activo")
