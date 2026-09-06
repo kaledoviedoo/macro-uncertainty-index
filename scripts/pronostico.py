@@ -1,5 +1,5 @@
 """
-pronostico.py — El motor de simulación, en un solo sitio.
+pronostico.py: El motor de simulación, en un solo sitio.
 
 Estaba dentro de app.py. Sacarlo aquí no es orden por orden: si el gráfico
 y el emisor de predicciones calculan el espectro con dos copias del mismo

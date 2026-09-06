@@ -1,23 +1,30 @@
 """
-predecir.py — El emisor. Fase 6.
+predecir.py (emisor de predicciones)
 
-Cada día estampa, para cada activo, la probabilidad de que caiga más de un
+Cada día registra, para cada activo, la probabilidad de que caiga más de un
 umbral dentro del horizonte. Con fecha, con método y sin posibilidad de
-reescribirla después.
+reescribirla después: eso es lo que convierte una opinión sobre el futuro en
+una apuesta que `resolver.py` puede cobrar.
 
-Ese "sin posibilidad de reescribirla" es el punto entero. Todo lo anterior
-—el grafo causal, el calendario, el espectro— produce afirmaciones sobre el
-futuro que suenan razonables. Esto las convierte en apuestas registradas, y
-`resolver.py` las cobra.
+Cuatro métodos compiten sobre las mismas fechas y activos:
 
-Cuatro métodos compiten sobre exactamente las mismas fechas y activos:
+  baseline_naive       Volatilidad histórica, sin regímenes.
+  baseline_tendencia   Mezcla por régimen más calendario de eventos.
+  llm_ajustado         Lo anterior, deformado por los impactos del grafo.
+  regla_vix            VIX sobre su percentil 80 anual. Es el listón real
+                       (2,08x de elevación con 41 % de cobertura fuera de
+                       muestra) y nadie le ha ganado todavía.
 
-  baseline_naive       Volatilidad histórica, sin regímenes. El listón bajo.
-  baseline_tendencia   Mezcla por régimen + calendario de eventos.
-  llm_ajustado         Lo anterior deformado por los impactos del grafo.
-  regla_vix            VIX por encima de su percentil 80 anual. El listón
-                       de verdad: gana 2,08x de elevación con 41 % de
-                       cobertura, y hasta hoy nadie le ha ganado.
+Cómo funciona:
+
+  · El umbral de cada activo son 1,2 desviaciones típicas suyas, no un
+    porcentaje fijo, porque un 3 % no significa lo mismo en el VIX que en
+    el dólar.
+  · Los cuatro métodos comparten semilla, que depende del activo y del día
+    pero nunca del método. Así la diferencia entre ellos es la del modelo y
+    no ruido de muestreo.
+  · La fecha de emisión sale de los datos (la moda de los últimos cierres)
+    y no del reloj del servidor.
 
     python scripts/predecir.py
     python scripts/predecir.py --horizonte 5 --umbral 3
@@ -42,81 +49,42 @@ from pronostico import matriz_transicion, prob_caida, proyectar, retornos
 
 MODELO = "motor-v1"
 
-# Cuánto pesa el segundo, tercer y cuarto aviso que llegan a un activo por el
-# mismo canal. El primero cuenta entero. Ver la nota larga en `ajuste_llm`:
-# varias noticias sobre el mismo mecanismo no son riesgos independientes, y
-# sumarlas enteras en varianza infla el cono.
-#
-# 1/3 es una elección razonada, no medida. Cuando el marcador tenga sucesos
-# suficientes se podrá calibrar comparando el acierto a distintos valores.
+# Peso del segundo aviso en adelante dentro de un mismo canal (el primero
+# cuenta entero). Es una elección razonada, no medida: se podrá calibrar
+# cuando el marcador tenga sucesos suficientes.
 PESO_CORRELADO = 0.33
 
 
 # ---------------------------------------------------------------------------
 def ajuste_llm(sb, ticker: str, horizonte: int) -> tuple[float, float, int]:
     """
-    Traduce los impactos vigentes del grafo a dos números.
+    Traduce los impactos vigentes del grafo a dos números: cuánto se ensancha
+    la volatilidad y hacia qué lado engorda la cola.
 
-    factor: cuánto se ensancha la volatilidad. Los impactos se componen en
-    VARIANZA, no multiplicándose: dos avisos de 1,3 dan 1,41 y no 1,69,
-    porque riesgos independientes se suman en varianza. Sin eso, cinco
-    noticias mediocres producirían un factor absurdo.
+    Los impactos se componen en VARIANZA, no multiplicándose: dos avisos de
+    1,3 dan 1,41 y no 1,69. Pero solo los independientes se suman enteros.
+    Dentro de un mismo canal describen el mismo mecanismo (cuatro titulares
+    sobre el mismo acuerdo no son cuatro riesgos), así que el mayor cuenta
+    entero y el resto lleva `PESO_CORRELADO`.
 
-    Pero solo los INDEPENDIENTES se suman enteros. Los que llegan por el
-    mismo canal describen el mismo mecanismo y llevan descuento — ver la
-    nota dentro de la función.
-
-    sesgo: hacia qué lado engorda la cola, de −1 a +1.
-
-    Ambos se ponderan por la confianza declarada, y solo entran impactos
-    con cita verificada cuyo horizonte no haya vencido.
-
-    Y NO entran los marcados como `lote_uniforme`: abanicos y titulares
-    estirados. Esas filas tienen la cita verificada —la frase existe— pero
-    la atribución es relleno, y ensanchar una distribución real con ellas
-    es peor que no tener noticia ninguna. Se quedan escritas en la base
-    para que el marcador pueda decir si esta decisión fue correcta; lo que
-    no hacen es mover un pronóstico mientras tanto.
+    Quedan fuera los marcados como `lote_uniforme`: tienen la cita
+    verificada pero la atribución es relleno. Se conservan en la base para
+    poder medir después si apartarlos fue correcto.
     """
     filas = (sb.table("impactos")
              .select("factor_incert,cola,intensidad_cola,confianza,"
                      "horizonte_d,creado_en,canal")
              .eq("ticker", ticker).eq("cita_verificada", True)
-             # `is.null` va incluido a propósito: las filas escritas antes de
-             # que existiera la columna la tienen a NULL, y en SQL
-             # `NULL = false` no es cierto sino desconocido. Con un `eq` a
-             # secas, todo el historial anterior desaparecería del pronóstico
-             # sin que nada avisara. Es el mismo fallo silencioso que el tope
-             # de 1.000 filas de PostgREST: no da error, da menos datos.
+             # El `is.null` es necesario: las filas anteriores a la columna
+             # la tienen a NULL, y en SQL `NULL = false` no es falso sino
+             # desconocido, así que un `eq` a secas las excluiría todas.
              .or_("lote_uniforme.is.null,lote_uniforme.eq.false")
              .gte("horizonte_d", horizonte)
              .order("creado_en", desc=True).limit(40).execute().data)
     if not filas:
         return 1.0, 0.0, 0
 
-    # DESCUENTO POR CORRELACIÓN.
-    #
-    # Sumar en varianza es correcto para riesgos INDEPENDIENTES, y hasta hoy
-    # se sumaba todo como si lo fuera. No lo es. El 2026-09-06 el petróleo
-    # tenía cuatro impactos del canal `oferta` que eran la misma historia
-    # —el acuerdo de Venezuela— contada por cuatro titulares distintos del
-    # FT en días distintos:
-    #
-    #     0.587  «take control of 65bn barrels of Venezuelan oil»
-    #     0.274  «Chevron to double Venezuela oil production»
-    #     0.193  «Trump's new state capitalism»
-    #     0.161  «Trump-linked companies race to secure deals»
-    #
-    # Aportaban 1,215 juntos, como si fueran cuatro riesgos separados. Son
-    # uno contado cuatro veces, y el motor lo leía como cuatro.
-    #
-    # No hay forma barata de saber si dos noticias son la misma historia,
-    # pero sí una aproximación honesta: si dos impactos llegan al MISMO
-    # activo por el MISMO canal, describen el mismo mecanismo. Dentro de
-    # cada canal el mayor cuenta entero y el resto a un tercio. No es una
-    # constante medida —haría falta el marcador para calibrarla— y por eso
-    # se declara arriba con nombre, para poder moverla cuando haya datos.
-    por_canal: dict[str, list[tuple[float, float, float]]] = {}
+    por_canal: dict[str, list[float]] = {}
     sesgo, peso_total = 0.0, 0.0
 
     for f in filas:
@@ -160,32 +128,22 @@ def senal_vix(regimen_df: pd.DataFrame) -> tuple[bool, float]:
 # ---------------------------------------------------------------------------
 def fecha_de_mercado(sb, tickers: list[str]) -> date:
     """
-    Con qué fecha se sella la predicción: la del CIERRE en que se basa.
+    Fecha del cierre en que se basa la predicción, deducida de los datos.
 
-    Antes se usaba `date.today()`, y en el runner de GitHub eso es un
-    problema silencioso. La secuencia arranca a las 00:30 UTC, que son las
-    19:30 de Bogotá del día ANTERIOR, así que cada tanda quedaba fechada un
-    día por delante del mercado que la generó y las del viernes caían en
-    sábado. Una predicción fechada un día sin bolsa es una etiqueta que
-    miente sobre sí misma.
+    No se usa `date.today()` porque el runner arranca a las 00:30 UTC, que
+    son las 19:30 de Bogotá del día anterior: las tandas del viernes caían
+    en sábado y dos corridas sobre el mismo cierre se duplicaban en vez de
+    pisarse (la fecha entra en la clave de conflicto).
 
-    Peor: el 28 y el 29 de agosto de 2026 se emitieron dos tandas —una a
-    mano y otra por el cron— sobre el mismo cierre del viernes. La clave de
-    conflicto incluye `emitida_en`, así que no se pisaron: se duplicaron.
-    Ochenta apuestas contadas ciento sesenta veces en el marcador.
-
-    La fecha se deduce de los datos, no del reloj: se toma la MODA de los
-    últimos cierres disponibles. La moda y no el máximo porque la TRM se
-    publica con fecha de vigencia futura y el máximo la seguiría a ella; ni
-    el mínimo, porque las bolsas asiáticas van un día por detrás. Lo que
-    manda es la fecha en la que cerró la mayoría.
+    Se toma la moda de los últimos cierres. No el máximo, porque la TRM se
+    publica con vigencia futura; ni el mínimo, porque las bolsas asiáticas
+    van un día por detrás.
     """
     salud = sb.table("v_salud_ingesta").select("ticker,ultimo_precio").execute().data
     objetivo = set(tickers)
     cierres = [r["ultimo_precio"] for r in salud
                if r["ticker"] in objetivo and r["ultimo_precio"]]
     if not cierres:
-        # Sin datos de salud no se inventa nada: se avisa y se usa el reloj.
         print("  AVISO: no pude deducir la fecha de mercado; uso la del sistema.")
         return date.today()
 
@@ -221,9 +179,6 @@ def main() -> None:
     P = matriz_transicion(reg_serie)
     marca_vix, prob_vix = senal_vix(reg)
 
-    # Solo activos de PRECIO. La lista vive en `comun.py` porque `extraer.py`
-    # necesita la misma: mientras estuvo aquí, el extractor gastaba cuota
-    # analizando ^VIX y ^TNX, que nunca llegan al marcador.
     activos = (sb.table("activos").select("ticker,nombre,tipo,frecuencia")
                .eq("activo", True).eq("verificado", True)
                .eq("frecuencia", "diaria")
@@ -257,11 +212,8 @@ def main() -> None:
                       index=pd.to_datetime([p["fecha"] for p in precios]))
         s = s[~s.index.duplicated(keep="last")].sort_index()
 
-        # Umbral en unidades del propio activo. Así "caída" significa lo
-        # mismo estadísticamente para NVIDIA que para el índice dólar, y el
-        # marcador puede promediar entre activos sin mezclar preguntas
-        # triviales con imposibles. Con 1,2 sigma el S&P sale en ~3 %, que
-        # es justo el umbral con el que medimos la regla del VIX.
+        # Umbral en sigmas del propio activo: así "caída" significa lo mismo
+        # para NVIDIA que para el índice dólar.
         sigma_h = float(retornos(s).tail(504).std() * np.sqrt(a.horizonte))
         umbral = (a.umbral / 100) if a.umbral else max(0.005, a.sigmas * sigma_h)
 
@@ -274,8 +226,6 @@ def main() -> None:
 
         factor, sesgo, n_imp = ajuste_llm(sb, t, a.horizonte)
 
-        # Los tres métodos ven exactamente la misma serie y el mismo día.
-        # Solo cambia lo que cada uno decide mirar.
         variantes = {
             "baseline_naive":     dict(regimen=None, P=None, factores_evento=None),
             "baseline_tendencia": dict(regimen=reg_serie, P=P, factores_evento=fe),
@@ -283,15 +233,10 @@ def main() -> None:
                                        factor_llm=factor, sesgo_cola=sesgo),
         }
 
-        # NÚMEROS ALEATORIOS COMUNES. La semilla depende del activo y del
-        # día, NUNCA del método: los tres simulan con el mismo sorteo.
-        #
-        # Con 3.000 trayectorias, el error de muestreo sobre una
-        # probabilidad del 10 % es de unos 0,55 puntos. Si cada método
-        # usara su propia semilla, dos métodos IDÉNTICOS podrían diferir
-        # un punto largo por puro azar, y el marcador atribuiría esa
-        # diferencia al modelo. Compartir el sorteo cancela ese ruido y
-        # deja solo la diferencia real.
+        # Números aleatorios comunes: la semilla depende del activo y del
+        # día, nunca del método. Con 3.000 trayectorias el ruido de muestreo
+        # ronda los 0,55 puntos, suficiente para que dos métodos idénticos
+        # parecieran distintos si cada uno sorteara por su cuenta.
         semilla = abs(hash((t, hoy.isoformat()))) % 2**31
 
         probs = {}
@@ -325,8 +270,7 @@ def main() -> None:
             "regimen_emision": str(reg_serie.iloc[-1]),
         })
 
-        # Una pregunta cuya respuesta es "casi nunca" o "casi siempre" no
-        # discrimina entre métodos: todos aciertan por el mismo motivo.
+        # Una pregunta casi imposible o casi segura no discrimina.
         p_ref = probs.get("baseline_tendencia", 0)
         aviso = "  <- trivial" if p_ref < 0.01 or p_ref > 0.60 else ""
 

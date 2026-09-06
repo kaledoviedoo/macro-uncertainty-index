@@ -1,5 +1,5 @@
 """
-app.py — La Terminal Óptica. Fase 3.
+app.py: La Terminal Óptica. Fase 3.
 
 Dos estados: un buscador negro y un dashboard.
 
@@ -436,7 +436,7 @@ def pintar(estado, comparaciones):
         fx = pr["fechas"]
         gris = "rgba(190,190,198,"
         # Dos bandas concéntricas: el 90 % central y el 50 % central. El
-        # abanico es el mensaje — no hay una línea, hay un rango de futuros.
+        # abanico es el mensaje: no hay una línea, hay un rango de futuros.
         for alto, bajo, opa, nom in ((pr["p95"], pr["p05"], "0.09", "90 % central"),
                                      (pr["p75"], pr["p25"], "0.16", "50 % central")):
             fig.add_trace(go.Scatter(x=fx, y=alto * esc, mode="lines",
@@ -542,7 +542,7 @@ def pintar(estado, comparaciones):
                   "",
                   "  Con deriva cero el mejor pronóstico del",
                   "  precio de mañana es el de hoy, y la forma",
-                  "  del abanico la marca solo el riesgo — que",
+                  "  del abanico la marca solo el riesgo, que",
                   "  es lo único que sí se estima bien."]
         else:
             L += ["",

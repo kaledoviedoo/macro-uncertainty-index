@@ -1,24 +1,30 @@
 """
-resolver.py — El cobrador. Fase 6.
+resolver.py (cobrador y marcador)
 
-Busca las predicciones cuyo horizonte ya venció y las enfrenta a lo que
-pasó. Después imprime el marcador.
+Busca las predicciones cuyo horizonte ya venció, las enfrenta a lo que pasó
+de verdad, y publica el marcador. Es la mitad del proyecto que decide si la
+otra mitad sirve.
 
-Dos decisiones que determinan si el marcador es honesto:
+Cómo funciona:
 
-  SE RESUELVE POR EL MÍNIMO, no por el cierre final. Una caída del 6 % que
-  se recupera antes del vencimiento sigue siendo una caída que te habría
-  dolido si estabas dentro. Es la misma definición que usó el emisor: si
-  no coincidieran, estaríamos evaluando una pregunta distinta de la que
-  se hizo.
+  · Se resuelve por el MÍNIMO de la ventana, no por el cierre final. Una
+    caída del 6 % que se recupera antes de vencer sigue siendo una caída, y
+    es la misma definición que usó el emisor.
+  · No se resuelve nada sin ventana completa. Si al activo le faltan días de
+    precio, la predicción sigue abierta. Dar por "no cayó" lo que aún no se
+    sabe es contar el silencio como acierto.
+  · El precio de referencia es el último cierre disponible al emitir, así
+    que una predicción fechada en fin de semana usa el viernes.
 
-  NO SE RESUELVE NADA SIN VENTANA COMPLETA. Si al activo le faltan días de
-  precio para cubrir el horizonte, la predicción sigue abierta. Dar por
-  "no cayó" lo que todavía no se sabe es contar el silencio como acierto,
-  que es exactamente el sesgo que hundió el objetivo del 88 %.
+El marcador se calcula aquí, en Python, y no en una vista de la base: cada
+número necesita su definición escrita al lado, y una vista que no viaja con
+el repositorio no se puede auditar. Cuenta apuestas distintas y no filas
+(los cuatro métodos opinan sobre el mismo activo y día), y se niega a
+ordenar métodos con menos de 20 caídas resueltas, porque con menos el Brier
+premia al que declara la probabilidad más baja y no al que acierta.
 
     python scripts/resolver.py
-    python scripts/resolver.py --marcador     # solo muestra, no resuelve
+    python scripts/resolver.py --marcador
 """
 
 from __future__ import annotations
@@ -126,24 +132,18 @@ def resolver(sb) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Qué fracción de las predicciones se "marcan" al comparar métodos.
-#
-# Ninguno de los métodos avisa por su cuenta: los tres simulados declaran una
-# probabilidad y `regla_vix` declara su tasa histórica. Comparar aciertos sin
-# igualar cuánto marca cada uno es la trampa que ya nos salió una vez: se
-# enfrentó el p90 del modelo (10 % marcado) contra una regla que marcaba el
-# 20 %, y el modelo "ganaba" solo por ser más selectivo. Igualada la tasa,
-# perdió. Aquí se marca el mismo porcentaje para todos, siempre.
+# Fracción que cada método "marca" al compararlos. Ninguno avisa por su
+# cuenta, así que se toma su 20 % de mayor probabilidad declarada, igual para
+# todos: comparar aciertos sin igualar la tasa hace ganar al más selectivo.
 TASA_DE_MARCADO = 0.20
 
-# Por debajo de esto no se publica ranking. No es prudencia: es que con dos
-# o tres eventos cualquier orden entre métodos es ruido, y una tabla ordenada
-# invita a leer un ganador donde no lo hay.
+# Por debajo de esto no se publica ranking: con dos o tres sucesos cualquier
+# orden es ruido, y una tabla ordenada invita a leer un ganador que no hay.
 MIN_EVENTOS_PARA_RANKING = 20
 
 
 def _leer_resueltas(sb) -> list[dict]:
-    """Todas las predicciones cerradas, paginando (PostgREST corta en 1.000)."""
+    """Todas las predicciones cerradas, paginadas."""
     filas, desde = [], 0
     while True:
         trozo = (sb.table("predicciones")
@@ -158,28 +158,7 @@ def _leer_resueltas(sb) -> list[dict]:
 
 
 def marcador(sb) -> None:
-    """
-    El marcador, calculado aquí y no en una vista.
-
-    ANTES SE LEÍA DE `v_marcador` Y MENTÍA. La vista agrupaba más fino que
-    por método —al parecer por ticker— pero el `print` solo sacaba el nombre
-    del método: dieciocho filas idénticas en la etiqueta, imposibles de
-    distinguir. La frecuencia base se tomaba de `grupo[0]` y se aplicaba a
-    las dieciocho. Y como esa base salió 0 %, la columna de elevación quedó
-    en `0.00x` para todo el mundo por construcción.
-
-    Peor todavía era el asterisco. Marcaba "mejor Brier que baseline_naive",
-    y en una semana sin una sola caída el Brier ordena por quién declaró el
-    número más bajo. Un método que dijera siempre 0 % los ganaba a todos. El
-    5 de septiembre de 2026 eso llenó la tabla de asteriscos que parecían
-    resultados y solo medían timidez.
-
-    Se calcula en Python por dos razones. La vista no está en `db/schema.sql`
-    —el archivo tiene la antigua `v_precision_por_metodo`—, así que nadie
-    podía leer cómo agrupaba sin conectarse a la base. Y porque cada número
-    de aquí necesita una definición escrita al lado, no enterrada en un SQL
-    que no viaja con el repositorio.
-    """
+    """Marcador por horizonte: calibración siempre, ranking solo con datos."""
     filas = _leer_resueltas(sb)
     if not filas:
         print(f"\n{'='*76}")
@@ -193,10 +172,8 @@ def marcador(sb) -> None:
     for h in sorted({f["horizonte_d"] for f in filas}):
         grupo = [f for f in filas if f["horizonte_d"] == h]
 
-        # La frecuencia base se mide sobre APUESTAS DISTINTAS, no sobre filas.
-        # Los cuatro métodos opinan sobre el mismo (ticker, día), así que
-        # contar filas multiplicaría por cuatro el mismo suceso y estrecharía
-        # cualquier intervalo de confianza a base de repetirse.
+        # Sobre apuestas distintas, no sobre filas: los cuatro métodos
+        # opinan sobre el mismo (ticker, día).
         apuestas = {(f["ticker"], f["emitida_en"]): bool(f["cayo"]) for f in grupo}
         eventos = sum(apuestas.values())
         base = eventos / len(apuestas) if apuestas else 0.0
@@ -205,7 +182,6 @@ def marcador(sb) -> None:
         print(f"  {len(grupo)} filas   ·   {len(apuestas)} apuestas distintas"
               f"   ·   {eventos} caídas   ·   frecuencia base {base*100:.1f} %")
 
-        # ---- El guardián. Sin sucesos no hay nada que puntuar. -----------
         if eventos < MIN_EVENTOS_PARA_RANKING:
             fechas = sorted({f["emitida_en"] for f in grupo})
             print(f"\n  SIN RANKING. Hacen falta {MIN_EVENTOS_PARA_RANKING} "
@@ -239,7 +215,7 @@ def _por_metodo(grupo: list[dict]) -> dict[str, list[dict]]:
 
 
 def _tabla_calibracion(grupo: list[dict], base: float) -> None:
-    """Lo poco que se puede afirmar con pocos sucesos."""
+    """Lo poco que se puede afirmar con pocos sucesos: calibración."""
     print(f"\n  {'MÉTODO':<22}{'n':>5}{'declara':>10}{'ocurrió':>10}"
           f"{'sesgo':>9}{'banda 80%':>11}")
     print(f"  {'-'*67}")
@@ -249,10 +225,8 @@ def _tabla_calibracion(grupo: list[dict], base: float) -> None:
         media = sum(probs) / len(probs)
         real = sum(bool(f["cayo"]) for f in fs) / len(fs)
 
-        # Cobertura de la banda p10-p90: por construcción debería contener el
-        # resultado el 80 % de las veces. Es la única métrica que ya tiene
-        # sucesos suficientes, porque cada predicción la pone a prueba —
-        # ocurra una caída o no.
+        # La banda p10-p90 es la unica metrica con datos suficientes desde
+        # el principio: cada prediccion la pone a prueba, haya caida o no.
         con_banda = [f for f in fs if f["acertada"] is not None]
         cob = (sum(bool(f["acertada"]) for f in con_banda) / len(con_banda)
                if con_banda else None)
@@ -283,14 +257,12 @@ def _tabla_ranking(grupo: list[dict], base: float) -> None:
         cayos = [bool(f["cayo"]) for f in fs]
         brier = sum((p - c) ** 2 for p, c in zip(probs, cayos)) / len(fs)
 
-        # Tasa de marcado IGUAL para todos: los k con mayor probabilidad.
         k = max(1, int(round(len(fs) * TASA_DE_MARCADO)))
         orden = sorted(zip(probs, cayos), key=lambda x: -x[0])[:k]
         acierta = sum(c for _, c in orden) / k
         elev = acierta / base if base else 0.0
 
-        # Un método que declara siempre lo mismo no puede discriminar: su
-        # "top 20 %" es un corte arbitrario entre valores idénticos.
+        # Si declara siempre lo mismo, su "top 20 %" es un corte arbitrario.
         plano = max(probs) - min(probs) < 1e-9
 
         con_banda = [f for f in fs if f["acertada"] is not None]

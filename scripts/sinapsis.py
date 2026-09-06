@@ -1,36 +1,31 @@
 """
-sinapsis.py — Enseña el grafo causal vigente, con la aritmética a la vista.
+sinapsis.py (inspector del grafo causal)
 
-POR QUÉ EXISTE
+Muestra, para cada activo, qué noticias están ensanchando su cono ahora
+mismo: la cita literal ya verificada, la fuente, y la aritmética completa
+que produce el factor. Sin esto el motor solo afirma que el crudo se
+ensancha un 77 %, y no hay forma de comprobarlo desde fuera.
 
-El motor dice que el cono del petróleo se ensancha un 66 %. Hasta ahora eso
-era un número que había que creerse: no había forma de ver qué noticias lo
-producían, qué frase exacta las sostenía, ni cómo seis impactos se convierten
-en 1,66. La afirmación central del proyecto —que las noticias deforman la
-distribución— quedaba fuera de toda inspección.
+Cómo funciona:
 
-Este archivo la pone dentro. Para cada activo enseña:
+  · Lee los impactos con cita verificada cuyo horizonte aún cubre la
+    ventana, y descarta los marcados como relleno (`lote_uniforme`).
+  · Los agrupa por canal, que es la unidad en la que se componen: dentro
+    de un canal el mayor cuenta entero y el resto lleva descuento, porque
+    describen el mismo mecanismo.
+  · Imprime la descomposición para que el factor se pueda recalcular a
+    mano, y avisa si el número que sale aquí no coincide con el que
+    aplica el motor.
 
-  · los impactos vigentes, con su cita literal ya verificada y su fuente
-  · cuánto aporta CADA UNO al ensanchamiento, en varianza
-  · cómo se agrupan por canal, con el descuento por correlación aplicado
-  · el exceso resultante, y la raíz que produce el factor final
-
-Con eso el factor se puede recalcular a mano. Un número auditable y un
-número convincente no son lo mismo, y hasta hoy este solo era lo segundo.
-
-EL FACTOR NO SE RECALCULA AQUÍ
-
-Se importa `ajuste_llm` de `predecir.py`, que es la función que lo usa de
-verdad. Reimplementar la fórmula para mostrarla sería crear una segunda
-versión que puede desviarse de la primera sin que nadie lo note — y entonces
-el inspector enseñaría un número que el motor no usa, que es peor que no
-tener inspector.
+El factor NO se recalcula en este archivo: se importa `ajuste_llm` de
+`predecir.py`, que es la función que lo usa de verdad. Un inspector con su
+propia copia de la fórmula acabaría enseñando un número que el motor no
+aplica, que es peor que no tener inspector.
 
     python scripts/sinapsis.py
     python scripts/sinapsis.py --ticker CL=F
-    python scripts/sinapsis.py --apartados      # lo que se dejó fuera y por qué
-    python scripts/sinapsis.py --todos          # incluye activos sin impactos
+    python scripts/sinapsis.py --apartados
+    python scripts/sinapsis.py --todos
 """
 
 from __future__ import annotations
@@ -63,7 +58,6 @@ def cargar(sb, horizonte: int) -> tuple[list[dict], dict, dict, dict]:
         "cita_verificada,razonamiento",
         orden="creado_en")
 
-    # Solo lo vigente: cita comprobada y horizonte que aún cubre la ventana.
     impactos = [i for i in impactos
                 if i.get("cita_verificada")
                 and int(i.get("horizonte_d") or 0) >= horizonte]
@@ -89,8 +83,6 @@ def pintar_impacto(imp: dict, noticias: dict, fuentes: dict,
     conf = float(imp.get("confianza") or 0.5)
     fac = float(imp["factor_incert"])
 
-    # El aporte de este impacto a la varianza. Es el sumando exacto que
-    # `ajuste_llm` acumula: conf * (factor^2 - 1).
     aporte = conf * max(0.0, fac ** 2 - 1)
     parte = (f"{aporte / exceso_canal * 100:.0f} % de su canal"
              if exceso_canal > 0 else "—")
@@ -137,8 +129,7 @@ def main() -> None:
         t = a.ticker.upper()
         impactos = [i for i in impactos if i["ticker"] == t]
 
-    # Se separan los apartados ANTES de agrupar: no cuentan para el factor,
-    # y mezclarlos aquí daría a entender que sí.
+    # Se separan antes de agrupar: no cuentan para el factor.
     vigentes = [i for i in impactos if not i.get("lote_uniforme")]
     apartados = [i for i in impactos if i.get("lote_uniforme")]
 
@@ -181,9 +172,7 @@ def main() -> None:
             print("     `baseline_tendencia`, hasta el decimal.\n")
             continue
 
-        # Los impactos se agrupan por canal PORQUE ASÍ SE COMPONEN. Verlos en
-        # una lista plana fue lo que dejó pasar que cuatro titulares sobre
-        # Venezuela contaran como cuatro riesgos distintos.
+        # Se agrupan por canal porque así es como se componen.
         por_canal: dict[str, list[float]] = {}
         for i in imps:
             conf = float(i.get("confianza") or 0.5)
@@ -199,16 +188,6 @@ def main() -> None:
             canal = imp.get("canal") or "?"
             pintar_impacto(imp, noticias, fuentes, sum(por_canal[canal]))
 
-        # LA COMPROBACIÓN. Es el punto entero del archivo: que el factor se
-        # pueda recalcular a mano desde los aportes de arriba.
-        #
-        # Esta parte estuvo MAL entre el commit del inspector y hoy. Sumaba
-        # todos los aportes en plano, como hacía `ajuste_llm` antes del
-        # descuento por correlación, así que enseñaba «suma 4.087 -> 2.26»
-        # y luego un factor de 1.77 que atribuía al tope de 2,50 — un tope
-        # que ni siquiera estaba actuando. El inspector explicaba su número
-        # con una aritmética que ya no era la del motor, que es exactamente
-        # el fallo contra el que se escribió su propia cabecera.
         exceso = 0.0
         print("     composición por canal   "
               f"(el mayor entero, el resto al {PESO_CORRELADO*100:.0f} %):")
@@ -229,7 +208,6 @@ def main() -> None:
         else:
             print()
         if abs(crudo - factor) > 0.005 and crudo <= 2.5:
-            # Si esto salta, el inspector y el motor han vuelto a divergir.
             print(f"     AVISO: el motor aplica {factor:.2f} y aquí sale "
                   f"{crudo:.2f}. Revisa `ajuste_llm`.")
         print(f"     Se componen en VARIANZA, no multiplicándose: dos avisos")
@@ -241,7 +219,7 @@ def main() -> None:
         print(f"\n{'='*78}")
         print(f"APARTADOS  ·  {len(apartados)} filas fuera del pronóstico")
         print(f"{'='*78}")
-        print("  Tienen la cita verificada —la frase existe— pero la atribución")
+        print("  Tienen la cita verificada (la frase existe) pero la atribución")
         print("  es relleno: abanico (varios activos, un canal, factores en")
         print("  escalera) o titular sin cuerpo estirado a varias filas.")
         print("  Siguen en la base para poder medir si apartarlas fue correcto.\n")
@@ -258,7 +236,7 @@ def main() -> None:
     print("  Cada cita de arriba se comprobó LITERALMENTE contra el documento")
     print("  antes de escribirse: coincidencia exacta o 92 % de cobertura de")
     print("  tokens en ventana. Que la frase exista es una garantía mecánica.")
-    print("  Que la atribución sea correcta, no — eso lo dirá el marcador.")
+    print("  Que la atribución sea correcta, no: eso lo dirá el marcador.")
     print(f"{'='*78}\n")
 
 

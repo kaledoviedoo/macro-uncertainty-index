@@ -1,5 +1,5 @@
 """
-diagnostico_colombia.py — De dónde sacar CBR e IBR de 2026.
+diagnostico_colombia.py: De dónde sacar CBR e IBR de 2026.
 
 NO ESCRIBE NADA. Solo pregunta y enseña lo que le contestan.
 
@@ -283,7 +283,7 @@ def main() -> None:
     print("""  Pégame esta salida entera.
 
   Con el punto 1 sabré si el hueco se arregla dentro del propio SDMX
-  —sería lo más limpio: un nombre de flujo distinto en `activos`— o si
+  (sería lo más limpio: un nombre de flujo distinto en `activos`) o si
   hay que cambiar de fuente.
 
   Con el punto 2 sabré si IBR se resuelve como se resolvió la TRM:

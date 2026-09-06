@@ -1,232 +1,188 @@
-# Motor de Inferencia Causal — Estado del proyecto
+# Motor de Inferencia Causal
 
-**Qué es:** un sistema local que lee documentos oficiales de bancos centrales y
-gobiernos, los conecta con 25 activos financieros, y estima **cuánta
-incertidumbre** hay sobre cada uno — no si va a subir o bajar.
+[![Secuencia diaria](https://github.com/kaledoviedoo/macro-uncertainty-index/actions/workflows/diario.yml/badge.svg)](https://github.com/kaledoviedoo/macro-uncertainty-index/actions/workflows/diario.yml)
+![Python](https://img.shields.io/badge/python-3.12%2B-blue)
+![Supabase](https://img.shields.io/badge/db-Supabase-3ECF8E)
+![Licencia](https://img.shields.io/badge/licencia-MIT-lightgrey)
+![Estado](https://img.shields.io/badge/estado-en%20medici%C3%B3n-orange)
 
-Esa distinción es el proyecto entero. Volvemos a ella al final.
-
----
-
-## 1. Dónde vamos
-
-| Fase | Qué es | Estado |
-|---|---|---|
-| **1** | Base de datos en la nube, esquema, universo de activos | ✅ Terminada |
-| **2** | Ingesta de precios, 10 años de histórico, régimen de mercado | ✅ Terminada |
-| **3** | La Terminal Óptica: buscador y gráfico | ✅ Terminada |
-| **4** | Ingesta de noticias por RSS + texto completo | ✅ Terminada |
-| **5** | Extracción con LLM + calendario de eventos | ✅ Funcionando en seco |
-| **6** | Marcador: ¿el motor acierta? | 🔬 Línea base medida |
-| **7** | Búsqueda semántica y ampliación del universo | ⬜ Sin empezar |
-
-### Lo que hay dentro ahora mismo
-
-- **68.000 filas de precios**, 25 activos, de 2016 a hoy
-- **2.515 días clasificados** por régimen: 68,9 % normal · 25,0 % estrés · 6,1 % shock
-- **16 fuentes oficiales verificadas** — Fed, BCE, Banco de Inglaterra, Banco de
-  Japón, Banrep, BLS (empleo, IPC, IPP), BEA, SEC, USTR, EIA
-- **141 fechas de eventos** con su impacto histórico medido
-- **4 canales colombianos**: TRM completa desde 1991, tasa de política,
-  IBR overnight, COLCAP mensual, más el ADR de Bancolombia
+Estima cuánta **incertidumbre** hay sobre 20 activos financieros a 5 días, leyendo cada noche los comunicados de bancos centrales y agencias oficiales. No predice si un activo sube o baja: predice cuánto se ensancha su distribución, y lleva un marcador que comprueba si acierta.
 
 ---
 
-## 2. Los tres números que importan hoy
+## Demo visual
 
-### El detector de caídas ya funciona, y cabe en una línea
-
+```mermaid
+flowchart LR
+    A[Precios<br/>yfinance · Banrep · datos.gov.co] --> D[(Supabase)]
+    B[Noticias RSS<br/>16 fuentes oficiales] --> C[Texto completo<br/>trafilatura · pdfplumber]
+    C --> E[Extracción LLM<br/>cita verificada]
+    E --> D
+    D --> F[Simulación<br/>Markov 3 estados · 3.000 rutas]
+    F --> G[4 métodos<br/>compitiendo]
+    G --> H[Marcador<br/>a 5 días hábiles]
+    G --> I[Terminal Óptica<br/>:8050]
 ```
-VIX por encima de su percentil 80 del último año
-```
 
-Medido sobre 2.009 días fuera de muestra, para caídas mayores al 3 % en 5 días:
+La secuencia completa corre sola de lunes a viernes en GitHub Actions y tarda unos 10 minutos.
 
-| | Valor |
+> Captura de la Terminal: pendiente. Se genera con `.\motor.ps1 app`.
+
+---
+
+## Stack Tecnológico
+
+| Capa | Herramientas |
 |---|---|
-| Frecuencia base de caídas | 11,25 % |
-| Marca | 20 % de los días |
-| De los días marcados, caen | **23,4 %** |
-| **Elevación** | **2,08×** |
-| **Cobertura** (caídas capturadas) | **41 %** |
+| Lenguaje | Python 3.12+ |
+| Datos | pandas, NumPy, scikit-learn |
+| Validación | Pydantic v2 |
+| Base de datos | Supabase (PostgreSQL) con RLS |
+| Interfaz | Dash + Plotly |
+| Extracción | Groq (`gpt-oss-120b`), Gemini como respaldo |
+| Ingesta | yfinance, feedparser, trafilatura, pdfplumber |
+| Infraestructura | GitHub Actions (cron diario) |
 
-Una regresión logística de diez variables con validación walk-forward dio 1,59×
-y 32 % a la misma tasa de aviso. **La regla de una línea gana.** Eso ahorra
-meses de complejidad inútil.
-
-### El objetivo del 88 % era una trampa
-
-Solo el 3,5 % de los días caen más del 2 %. Un modelo que **nunca** anuncie una
-caída acierta el 96,5 %. Perseguir "88 % de exactitud" habría producido algo
-peor que el silencio, con apariencia de funcionar.
-
-Las métricas reales son tres: **elevación** sobre la base, **cobertura** de las
-caídas, y **calibración** — cuando dice 18 %, ¿pasa el 18 % de las veces?
-
-### El extractor diferencia el signo por activo
-
-Sobre un artículo del FMI titulado *"AI to fuel global growth as investment
-spreads beyond US"*, el modelo devolvió:
-
-| Activo | Factor | Cola | Horizonte | Confianza |
-|---|---|---|---|---|
-| ^GSPC | 1,12 | ↓ | 30 d | 0,78 |
-| DX-Y.NYB | 1,10 | ↓ | 20 d | 0,75 |
-| **^STOXX50E** | **1,15** | **↑** | 30 d | 0,80 |
-
-Bolsa estadounidense y dólar a la baja, bolsa europea al alza, ante una
-noticia sobre crecimiento que se desplaza fuera de Estados Unidos. Es el
-razonamiento correcto, y salió de tres juicios distintos: tres factores,
-tres horizontes, dos direcciones. Dos versiones antes del prompt, ese mismo
-documento producía tres filas idénticas con `1.10 / izquierda`.
-
-**Citas inventadas: 0 %.** Cada fila lleva una frase literal del documento,
-verificada por código contra el texto original.
-
-### El informe de empleo de EE.UU. mueve más al peso que al S&P 500
-
-| Activo | Factor en día de evento | p |
-|---|---|---|
-| **TRM (peso colombiano)** | **1,53×** | 0,0000 |
-| Bono 10 años EE.UU. | 1,51× | 0,0036 |
-| S&P 500 | 1,24× | 0,0364 |
-| Nasdaq 100 | 1,23× | 0,0253 |
-
-Ese es el efecto de segundo orden que justifica todo el proyecto: un dato
-laboral estadounidense agita el peso colombiano un 53 % por encima de lo normal.
+**Fuentes de datos:** Reserva Federal, BCE, Banco de Inglaterra, Banco de Japón, Banrep, BLS, BEA, SEC, USTR, EIA, Financial Times, SDMX de Banrep, datos.gov.co.
 
 ---
 
-## 3. Qué falta
+## Features principales
 
-**Inmediato — quitar el `--seco`.** El extractor funciona pero corre en modo
-prueba: procesa todo y no escribe. Una pasada sin esa bandera puebla el grafo
-de impactos por primera vez.
-
-**Corto plazo**
-
-- Automatizar la secuencia nocturna con el Programador de tareas de Windows
-- Emitir predicciones fechadas: sin una fila con fecha y hora no hay nada que
-  evaluar después, y esa es la fase 6
-- Importar los calendarios oficiales de FOMC, IPC y juntas del Banrep (hoy solo
-  está el informe de empleo, derivado por regla)
-- Los 4 PDFs del Banco de Japón entran bien, pero algunos comunicados siguen
-  siendo tablas: revisar si el recorte a 12.000 caracteres corta lo importante
-
-**Medio plazo**
-
-- Propagación por el grafo a dos y tres saltos, que es donde está la ventaja
-- Rellenar el hueco de 233 días en CBR e IBR usando los comunicados del Banrep
-- Medir si el LLM supera el 2,08× de la regla del VIX
-
-**Nunca, a propósito**
-
-- Predecir el precio de mañana
-- Recomendar comprar o vender
+- **Distribución, no dirección.** El modelo no estima si el precio sube. Estima el ancho del cono y hacia qué lado engorda la cola, que es lo que un documento oficial sí permite deducir.
+- **Cita verificada mecánicamente.** Cada impacto exige una frase literal del documento, comprobada con coincidencia exacta o 92 % de cobertura de tokens. Sin cita no se escribe la fila.
+- **Marcador que se niega a puntuar.** Con menos de 20 caídas resueltas no publica ranking y explica por qué: ordenar por Brier cuando casi nada ha ocurrido premia al que declara la probabilidad más baja.
+- **Cuatro métodos con el mismo sorteo.** `baseline_naive`, `baseline_tendencia`, `llm_ajustado` y `regla_vix` simulan con números aleatorios comunes, así que la diferencia entre ellos no es ruido de muestreo.
+- **Grafo auditable.** `sinapsis` muestra, para cada activo, qué noticias ensanchan su cono, con la cita, la fuente y la aritmética que produce el factor.
+- **Detectores de relleno.** Marca los abanicos (varios activos, un canal, factores en escalera) y recorta la confianza de los titulares sin cuerpo. Las filas marcadas se conservan para poder medir si apartarlas fue correcto.
+- **Régimen de mercado.** Cadena de Markov de 3 estados (normal, estrés, shock) estimada sobre 2.520 días, para que la simulación no proyecte solo días buenos.
+- **Ejecución desatendida.** GitHub Actions corre la secuencia cada tarde sin necesidad de dejar el equipo encendido.
 
 ---
 
-## 4. Tecnologías
+## Instalación (Getting Started)
 
-| Capa | Herramienta | Por qué |
-|---|---|---|
-| Lenguaje | **Python 3.13** | El ecosistema de datos vive aquí |
-| Base de datos | **Supabase (PostgreSQL)** | En la nube, capa gratuita, cero RAM local |
-| Interfaz | **Dash + Plotly** | Gráficos profesionales sin escribir JavaScript |
-| Datos | **pandas · NumPy** | Manipulación de series temporales |
-| Modelos | **scikit-learn** | Regresión logística con validación walk-forward |
-| Validación | **Pydantic** | El contrato que el LLM debe cumplir |
-| Fuentes | **yfinance · SDMX · Socrata · RSS · GDELT** | Cinco protocolos distintos, un esquema |
-| Documentos | **trafilatura · pdfplumber** | El texto real detrás del titular, HTML y PDF |
-| Razonamiento | **Groq o Gemini** | Capa gratuita, en lote nocturno |
-| Seguridad | **RLS de PostgreSQL** | La app solo lee; escribir requiere otra clave |
-
-### Cómo se ejecuta
-
-Todo pasa por `motor.ps1`, que resuelve solo la ruta del entorno virtual:
+**Requisitos:** Python 3.12+, una cuenta de Supabase (plan gratuito) y una clave de Groq o Gemini (ambas gratuitas).
 
 ```powershell
-cd C:\Users\User\OneDrive\Desktop\finance
+git clone https://github.com/kaledoviedoo/macro-uncertainty-index.git
+cd macro-uncertainty-index
 
-.\motor.ps1                    # lista los comandos
-.\motor.ps1 estado             # panel de control
-.\motor.ps1 app                # la Terminal, en :8050
+# Crea el entorno virtual e instala dependencias
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
 
-.\motor.ps1 precios            # diario
-.\motor.ps1 noticias           # diario
-.\motor.ps1 enriquecer         # texto completo de las fuentes oficiales
-.\motor.ps1 extraer --limite 20
+```bash
+# En Linux o macOS
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-.\motor.ps1 senales            # marcador de señales
-.\motor.ps1 caidas             # validación fuera de muestra
+**Base de datos.** En el editor SQL de Supabase, ejecuta en orden:
+
+```
+db/schema.sql
+db/migracion_001_lote_uniforme.sql
+db/migracion_002_razonamiento.sql
+```
+
+**Credenciales.** Copia `.env.example` a `.env` y rellena:
+
+```ini
+SUPABASE_URL=https://TU_PROYECTO.supabase.co
+SUPABASE_ANON_KEY=sb_publishable_...
+SUPABASE_SERVICE_KEY=sb_secret_...
+GROQ_API_KEY=gsk_...
+```
+
+**Comprobación.**
+
+```powershell
+.\motor.ps1 verificar    # prueba la conexión y las fuentes
+.\motor.ps1 precios      # carga 10 años de histórico
+.\motor.ps1 estado       # panel de control
+```
+
+Para la ejecución automática, define esas cuatro variables como *secrets* del repositorio. El workflow de `.github/workflows/diario.yml` no necesita nada más.
+
+---
+
+## Ejemplos de uso
+
+```powershell
+.\motor.ps1                    # lista los 19 comandos
+.\motor.ps1 app                # Terminal Óptica en localhost:8050
+.\motor.ps1 sinapsis           # el grafo causal vigente
+.\motor.ps1 predecir --seco    # calcula sin escribir
+.\motor.ps1 marcador           # resultados acumulados
+```
+
+Consultar el grafo de un solo activo:
+
+```powershell
+python scripts\sinapsis.py --ticker CL=F
+```
+
+```
+CL=F         Petroleo WTI (futuros)
+factor 1.77   sesgo -0.00   ·   13 impacto(s) vigente(s)
+
+   x1.30 ↓ oferta   30d   conf 0.85   aporta 0.587  (23 % de su canal)
+      EIA - Today in Energy  ·  N1  ·  2026-08-24  ·  2,444 car.
+      «Seaborne petroleum product exports from Nigeria have grown sevenfold»
+
+   composición por canal   (el mayor entero, el resto al 33 %):
+     oferta               0.587 + 0.33·2.773  =  1.502
+     riesgo_geopolitico   0.345 + 0.33·0.161  =  0.398
+     exceso total                                2.120
+   raíz(1 + 2.120) = 1.77
+```
+
+Ejecutar las pruebas (62 comprobaciones, sin red ni base de datos):
+
+```powershell
+py pruebas\filtros.py
+py pruebas\banrep.py
+py pruebas\marcador.py
+py pruebas\composicion.py
+py pruebas\grafo.py
 ```
 
 ---
 
-## 5. Por qué este proyecto es interesante
+## Estructura de directorios
 
-**Porque se niega a mentirte.** Casi todo el software financiero está diseñado
-para producir confianza. Este está diseñado para producir dudas cuantificadas.
-Cada componente lleva su propio detector de errores:
-
-- La línea del gráfico **se corta** en los huecos de datos, en vez de dibujar
-  una tendencia que nunca ocurrió
-- La deriva está **forzada a cero** por defecto, porque las 24 series del
-  universo tienen tendencia histórica positiva y eso describe la década
-  2016-2026, no a los activos
-- Cada cita del LLM se **verifica mecánicamente** contra el documento original
-- La comparación entre modelos **iguala la tasa de aviso** antes de comparar
-
-**Porque midió su propio sesgo y lo publicó.** La primera versión estimaba la
-tendencia usando solo días tranquilos. Sonaba sensato y triplicaba la deriva:
-el S&P 500 pasaba de 13,4 % a 44,5 % anual y NVIDIA a 176 %. Borrar los
-shocks equivale a pronosticar un mundo sin caídas. Ahora se simulan.
-
-**Porque encontró que la complejidad no paga.** Diez variables, walk-forward,
-embargo, regularización — y pierde contra una regla de una línea. Saber eso
-vale más que el modelo.
-
-**Porque mira donde nadie mira.** El peso colombiano, el COLCAP y el IBR tienen
-una fracción de los ojos que vigilan el S&P 500. La información se incorpora
-más despacio ahí, y eso es exactamente donde un sistema paciente puede aportar.
-
----
-
-## 6. Para qué sirve, después de la reorientación
-
-Empezó como "predecir el precio". Eso no funciona, y perseguirlo produce
-sistemas que suenan convincentes y aciertan como una moneda.
-
-Ahora sirve para tres cosas, ordenadas por cuán seguras son:
-
-### Muy probable — un instrumento de contexto honesto
-Buscas un activo y ves, en una pantalla: su precio real, si el mercado está en
-régimen normal o alterado, el espectro de dónde puede estar en tres meses con
-su banda de incertidumbre, qué eventos de calendario vienen, qué otros activos
-se mueven antes que él y con cuántos días de ventaja, y de dónde salió cada
-dato. **Eso ya vale la pena sin afirmar nada sobre el futuro.**
-
-### Plausible — un aviso de riesgo calibrado
-No "va a caer", sino: *"hoy la probabilidad de una caída mayor al 3 % en cinco
-días es del 23 %, el doble de lo normal, porque el VIX está en su percentil 85
-y el jueves hay dato de empleo."* Verificable, con un marcador que dice si esa
-probabilidad se cumple.
-
-### Posible, sin probar — ventaja en las cadenas lentas
-Un arancel al acero chino mueve a las acereras en segundos. Pero la cadena
-completa —menor demanda de materias primas, presión sobre las divisas
-exportadoras, libro de crédito de los bancos locales— tarda días en recorrerse,
-y casi nadie la recorre entera. Ahí es donde el grafo causal podría tener una
-ventaja real. **Es una hipótesis, y el sistema está construido para falsarla.**
+```
+macro-uncertainty-index/
+├── app.py                      Terminal Óptica (Dash)
+├── motor.ps1                   Lanzador con 19 subcomandos
+├── setup.ps1                   Entorno virtual y dependencias
+├── db/
+│   ├── schema.sql              Tablas, vistas y políticas RLS
+│   ├── migracion_*.sql         Cambios incrementales
+│   └── volcar_esquema.sql      Regenera schema.sql desde la base
+├── scripts/
+│   ├── comun.py                Conexión, paginación, escritura por lotes
+│   ├── ingestar_precios.py     yfinance + clasificación de régimen
+│   ├── ingestar_banrep.py      Series colombianas vía SDMX
+│   ├── ingestar_noticias.py    RSS de 16 fuentes oficiales
+│   ├── enriquecer.py           Texto completo (HTML y PDF)
+│   ├── modelos.py              Esquema Pydantic y filtros de calidad
+│   ├── prompts.py              Instrucciones del extractor
+│   ├── extraer.py              Lote nocturno con el LLM
+│   ├── pronostico.py           Simulador Markov compartido
+│   ├── predecir.py             Emite las predicciones del día
+│   ├── resolver.py             Cobra las vencidas y calcula el marcador
+│   ├── sinapsis.py             Inspector del grafo causal
+│   ├── calendario.py           Eventos de fecha conocida
+│   ├── evaluar.py              Señales de caída en muestra
+│   ├── modelo_caidas.py        Validación fuera de muestra
+│   └── estado.py               Panel de control
+└── pruebas/                    62 comprobaciones sin red
+```
 
 ---
 
-## 7. La regla de la casa
+## Contacto
 
-> Una predicción sin marcador es una opinión con formato de dato.
-
-Por eso la fase 6 no es opcional, la tabla `predicciones` existió desde el
-primer día, y el listón para el LLM es un número concreto: **superar 2,08× de
-elevación con 41 % de cobertura y menos de 5 puntos de error de calibración.**
-
-Si no lo supera, no entra — por muy bien que suenen sus explicaciones.
+**Kaled Oviedo** · [@kaledoviedoo](https://instagram.com/kaledoviedoo) en Instagram · [github.com/kaledoviedoo](https://github.com/kaledoviedoo)

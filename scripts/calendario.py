@@ -1,5 +1,5 @@
 """
-calendario.py — Frente 1 de la fase 5: eventos de fecha conocida.
+calendario.py: Frente 1 de la fase 5: eventos de fecha conocida.
 
 Sin LLM, sin adivinación. Las fechas del FOMC, del IPC y de la junta del
 Banrep se publican con meses de antelación, y cuánto se mueve cada activo
@@ -64,7 +64,7 @@ def sembrar(sb) -> None:
     # confirmado precisamente porque es una derivación, no el calendario.
     # Desde 2016 y no desde 2024: la calibración necesita eventos DENTRO del
     # histórico de precios. Con 29 fechas útiles los factores salían de 1,3 a
-    # 1,6 pero con p de 0,06 a 0,13 — el efecto estaba ahí y no se distinguía
+    # 1,6 pero con p de 0,06 a 0,13: el efecto estaba ahí y no se distinguía
     # del ruido por falta de muestra. Con diez años son ~120 eventos y la
     # potencia del contraste se multiplica por dos.
     print("\n  Derivando fechas del informe de empleo (regla: primer viernes)…")
@@ -99,7 +99,7 @@ def calibrar(sb) -> None:
     precio ese día frente a un día cualquiera.
 
     El estadístico es deliberadamente simple: media del valor absoluto del
-    retorno. No estima dirección —eso ya sabemos que no se puede— sino
+    retorno. No estima dirección (eso ya sabemos que no se puede) sino
     magnitud, que es lo que sí se estima bien.
     """
     print(f"\n{'='*70}\nCALIBRANDO IMPACTO HISTÓRICO\n{'='*70}")

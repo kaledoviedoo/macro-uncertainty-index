@@ -1,5 +1,5 @@
 """
-estado.py — El panel de control de la base, desde la terminal.
+estado.py: El panel de control de la base, desde la terminal.
 
 Las consultas SQL que fui dejando no se ejecutan en PowerShell: `select` allí
 es `Select-Object`, un cmdlet que no tiene nada que ver. O las pegas en el
@@ -139,7 +139,7 @@ def main() -> None:
         n = getattr(abiertas, "count", None) or 0
         print(f"  Todavía no hay predicciones resueltas. {n} abiertas.")
         print("  Se cobran a 5 días hábiles: hasta que la ventana no cierre,")
-        print("  `resolver.py` se niega a puntuarlas. Negarse es correcto —")
+        print("  `resolver.py` se niega a puntuarlas. Negarse es correcto:")
         print("  resolver con datos incompletos infla el marcador solo.")
         print("\n  Este número es el que decide si el motor sirve o solo")
         print("  suena convincente. Hasta que exista, todo lo demás es")

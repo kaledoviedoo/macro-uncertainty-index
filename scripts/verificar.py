@@ -1,14 +1,18 @@
 """
-verificar.py — Cierre de la Fase 1.
+verificar.py (comprobación contra el mundo real)
 
-Comprueba contra el mundo real las dos cosas que no se pueden asumir:
-  1. Que cada ticker sembrado devuelve datos de verdad (H-03).
-  2. Que cada feed RSS oficial responde y sigue existiendo.
+Antes de ingerir nada, comprueba las dos cosas que no se pueden asumir: que
+cada ticker sembrado devuelve datos de verdad y que cada feed RSS oficial
+sigue respondiendo. Marca los que funcionan en `activos.verificado` y
+`fuentes.url_verificada`, y deja el resto en `ingesta_log`.
 
-Marca en la base los que funcionan (`activos.verificado`, `fuentes.url_verificada`)
-y registra todo en `ingesta_log`. Nada aquí escribe precios: solo verifica.
+Con las fuentes prueba tres cabeceras distintas y guarda la que funcionó en
+`fuentes.ua_perfil`: las agencias estadísticas de EE.UU. quieren un
+identificador con contacto y los WAF comerciales solo hablan con
+navegadores, así que no hay una que sirva para todas.
 
-Uso:
+No escribe precios. Solo verifica.
+
     python scripts/verificar.py
     python scripts/verificar.py --solo-tickers
     python scripts/verificar.py --solo-fuentes
@@ -41,11 +45,9 @@ except ImportError as e:
 
 RAIZ = Path(__file__).resolve().parent.parent
 
-# yfinance guarda una caché SQLite de zonas horarias. Por defecto la pone
-# en una ruta del perfil que en Windows puede acabar sincronizada, y con
-# threads=True varios hilos la abren a la vez: "database is locked", y el
-# ticker se marca como muerto cuando en realidad está perfectamente vivo.
-# Fijarla en una carpeta local y no sincronizada elimina el problema.
+# La caché de zonas horarias de yfinance va a una ruta del perfil que en
+# Windows puede acabar sincronizada; con varios hilos da "database is
+# locked" y el ticker se marca como muerto estando vivo.
 CACHE = Path.home() / ".cache" / "yfinance"
 CACHE.mkdir(parents=True, exist_ok=True)
 try:
@@ -53,12 +55,9 @@ try:
 except Exception:
     pass  # versiones antiguas de yfinance no exponen esta función
 
-# No existe un User-Agent que sirva para todas las fuentes, y esto no es
-# una teoría: está medido. El BLS acepta un identificador honesto con
-# contacto y devuelve 403 ante un User-Agent de navegador (le huele a
-# scraper disfrazado). OPEP y FMI hacen exactamente lo contrario. Así que
-# en vez de elegir un bando, se prueban los perfiles en orden y se recuerda
-# cuál funcionó para cada fuente.
+# Está medido: el BLS devuelve 403 ante un User-Agent de navegador y acepta
+# uno con contacto; la OPEP y el FMI hacen lo contrario. Se prueban los tres
+# perfiles en orden y se recuerda cuál funcionó para cada fuente.
 CONTACTO = "kaledoviedoo@gmail.com"
 
 PERFILES_UA = {
@@ -88,11 +87,8 @@ PERFILES_UA = {
 
 
 # --------------------------------------------------------------------------
-# Diagnóstico de la clave
-#
-# "Invalid API key" es el error más opaco de Supabase: no distingue entre
-# una clave mal copiada, la clave equivocada y una clave rotada. Esto lo
-# resuelve antes de llamar a la API.
+# Diagnóstico de la clave. "Invalid API key" no distingue entre una clave
+# mal copiada, la equivocada y una rotada; esto lo resuelve antes de llamar.
 # --------------------------------------------------------------------------
 def describir_clave(clave: str) -> tuple[str, str | None]:
     """Devuelve (tipo legible, rol si se puede deducir)."""
@@ -123,7 +119,7 @@ def revisar_clave(clave_cruda: str) -> str:
 
     if any(c.isspace() for c in clave):
         problemas.append(
-            "tiene un espacio o un salto de línea EN MEDIO — "
+            "tiene un espacio o un salto de línea EN MEDIO. "
             "es lo que pasa cuando el portapapeles parte la clave en dos líneas"
         )
     if clave.startswith("pega_aqui") or not clave:
@@ -142,7 +138,7 @@ def revisar_clave(clave_cruda: str) -> str:
             "  La pública solo puede leer (política RLS). Este script necesita\n"
             "  escribir los flags `verificado` y `url_verificada`.\n\n"
             "  Busca en el dashboard la que dice 'service_role' o 'secret'.\n"
-            "  Viene oculta detrás de un botón 'Reveal' — hay que pulsarlo\n"
+            "  Viene oculta detrás de un botón 'Reveal' (hay que pulsarlo\n"
             "  antes de copiar, o copias la máscara en vez de la clave.\n"
         )
 
@@ -249,19 +245,16 @@ def verificar_tickers(sb: Client) -> None:
         except Exception:
             sospechosos.append(t)
 
-    # Segunda pasada, de uno en uno y sin hilos.
-    # Un fallo en lote no prueba que el símbolo esté muerto: puede ser un
-    # timeout, un 429 o una colisión en la caché. Condenar un ticker por el
-    # resultado de una sola llamada concurrente es un falso negativo, y los
-    # falsos negativos se convierten en huecos silenciosos en el histórico.
+    # Segunda pasada, de uno en uno. Un fallo en lote puede ser un timeout
+    # o una colisión de caché, y un falso negativo aquí se convierte en un
+    # hueco silencioso en el histórico.
     fallidos = []
     if sospechosos:
         print(f"\n  Reintentando {len(sospechosos)} en serie: {', '.join(sospechosos)}\n")
         for t in sospechosos:
             resuelto = False
-            # Ventana creciente. Un instrumento poco líquido puede no tener
-            # 10 sesiones en un mes y estar perfectamente vivo; condenarlo
-            # por una ventana corta es el mismo falso negativo de antes.
+            # Ventana creciente: un instrumento poco líquido puede no
+            # tener 10 sesiones en un mes y estar perfectamente vivo.
             for periodo, minimo in (("1mo", 10), ("6mo", 30), ("2y", 60)):
                 try:
                     d = yf.download(t, period=periodo, interval="1d",
@@ -273,7 +266,7 @@ def verificar_tickers(sb: Client) -> None:
                         ok.append((t, len(serie), ultimo))
                         if dias > 7:
                             print(f"  AVISO {t}: último dato hace {dias} días "
-                                  f"— puede estar dejando de cotizar.")
+                                  f"(puede estar dejando de cotizar).")
                         resuelto = True
                         break
                 except Exception as exc:
@@ -302,7 +295,7 @@ def verificar_tickers(sb: Client) -> None:
     if fallidos:
         print("  Los fallidos quedan con verificado=false y NO se ingestan.")
         print("  Para índices latinoamericanos suele hacer falta un símbolo alternativo")
-        print("  o una fuente distinta a Yahoo — revísalos uno a uno antes de insistir.")
+        print("  o una fuente distinta a Yahoo. Revísalos uno a uno antes de insistir.")
 
 
 # --------------------------------------------------------------------------

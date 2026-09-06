@@ -1,5 +1,5 @@
 """
-ingestar_banrep.py — Series colombianas desde su fuente primaria.
+ingestar_banrep.py: Series colombianas desde su fuente primaria.
 
 Sustituye a ingestar_colcap.py, que solo sabía traer un índice. Ahora recorre
 todos los activos con `fuente_datos = 'banrep_sdmx'` y usa el dataflow que
@@ -102,7 +102,7 @@ def _parsear(contenido: bytes) -> dict[Clave, list[tuple[str, float]]]:
     Devuelve las observaciones AGRUPADAS por serie.
 
     Agrupar no es un lujo: un dataflow puede contener varias series a la vez.
-    El de IBR trae 25.580 observaciones para 5.844 días — son varios plazos
+    El de IBR trae 25.580 observaciones para 5.844 días: son varios plazos
     mezclados. Aplanarlos todos en un mismo ticker haría que colisionaran en
     la clave (ticker, fecha) y el upsert guardaría uno al azar cada noche.
     """
@@ -219,7 +219,7 @@ def pedir_datos(flujo: str, desde: int
     los datos MÁS RECIENTES, no con la primera que conteste.
 
     ESTE ERA EL FALLO. La variante con fechas iba primera y respondía siempre,
-    así que ganaba la carrera — pero `endPeriod=2026` Banrep lo interpreta
+    así que ganaba la carrera: pero `endPeriod=2026` Banrep lo interpreta
     como el instante INICIAL de 2026, no el final, y devolvía la serie cortada
     en 2025-12-31. La misma URL sin filtro devuelve hasta hoy.
 
@@ -236,7 +236,7 @@ def pedir_datos(flujo: str, desde: int
     fallo silencioso que el tope de 1.000 filas de PostgREST.
 
     Por eso ahora no basta con que una variante responda: tiene que traer algo
-    reciente. Si la primera ya lo hace —que es el caso normal— se para ahí y
+    reciente. Si la primera ya lo hace (que es el caso normal) se para ahí y
     cuesta lo mismo que antes. Si no, sigue probando y se queda con la menos
     rezagada, diciendo en voz alta cuál descartó y por qué.
     """
@@ -278,7 +278,7 @@ def pedir_datos(flujo: str, desde: int
               f"rezago); probando otra variante")
 
     if mejor:
-        return mejor[1], f"{mejor[2]} — la menos rezagada, hasta {mejor[0]}"
+        return mejor[1], f"{mejor[2]} (la menos rezagada, hasta {mejor[0]})"
     return {}, ""
 
 

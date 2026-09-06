@@ -1,19 +1,32 @@
 """
-modelos.py — Contrato de salida del LLM.
+modelos.py (contrato de salida del LLM y filtros de calidad)
 
-Estos modelos son la frontera entre el lenguaje y la base de datos. Todo lo
-que el modelo diga y no quepa aquí, se descarta.
+Frontera entre el lenguaje y la base de datos: lo que el modelo diga y no
+quepa aquí se descarta. Define el esquema Pydantic de un impacto, traduce
+los sinónimos que devuelven los modelos, y aplica los filtros que separan
+un análisis de un relleno con buena forma.
 
-La decisión de diseño central: **no hay campo de dirección**. No se le
-pregunta si el activo sube o baja, porque el centro de la distribución es el
-parámetro que no sabemos estimar y pedirlo solo produce confianza falsa. Se
-le pregunta cuánto se ensancha la incertidumbre y hacia qué lado engorda la
-cola, que sí es contestable desde un documento.
+Dos decisiones sostienen el diseño:
 
-La segunda decisión: `cita` es obligatoria y se verifica MECÁNICAMENTE
-contra el texto original. Un LLM inventa una cita con la misma fluidez con
-la que inventa un análisis; comprobar que la frase existe es un `in` de
-Python, no una pregunta al modelo.
+  · No hay campo de dirección. No se pregunta si el activo sube o baja: el
+    centro de la distribución es el parámetro que no sabemos estimar, y
+    pedirlo solo produce confianza falsa. Se pregunta cuánto se ensancha la
+    incertidumbre y hacia qué lado engorda la cola.
+  · La cita es obligatoria y se verifica contra el texto original con un
+    `in` de Python, no preguntándole al modelo. Un LLM inventa una cita con
+    la misma fluidez con la que inventa un análisis.
+
+Los filtros, en orden de aplicación:
+
+  validar_por_partes   Valida impacto a impacto, no el documento entero, y
+                       nombra el valor que causó cada rechazo.
+  coherente            Corrige descuidos de contabilidad y rechaza solo las
+                       contradicciones de fondo.
+  verificar_cita       Coincidencia exacta tras normalizar, o 92 % de
+                       cobertura de tokens en ventana.
+  techo_de_titular     Recorta la confianza de documentos sin cuerpo.
+  detectar_abanico     Marca el patrón de rellenar una tabla: varios
+                       activos, un canal y factores en escalera.
 """
 
 from __future__ import annotations
@@ -139,14 +152,9 @@ class Extraccion(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Normalización de la respuesta cruda.
-#
-# Los modelos responden en inglés aunque el prompt esté en español, y
-# rebautizan campos con sinónimos razonables. Rechazar por eso sería exigir
-# obediencia literal en algo que no cambia el contenido: `impacts` y
-# `impactos` son la misma lista. Lo que NO se relaja es lo sustantivo —
-# la cita, el rango del factor, la coherencia—, que se sigue validando
-# igual de duro después.
+# Sinónimos. Los modelos responden en inglés aunque el prompt esté en
+# español; `impacts` e `impactos` son la misma lista. Lo sustantivo (cita,
+# rango del factor, coherencia) se sigue validando igual de duro después.
 # ---------------------------------------------------------------------------
 _ALIAS_RAIZ = {
     "impacts": "impactos", "impact": "impactos", "items": "impactos",
@@ -191,7 +199,6 @@ def normalizar(bruto: dict) -> dict:
 
     out = {_ALIAS_RAIZ.get(k, k): v for k, v in bruto.items()}
 
-    # Algunos modelos devuelven la lista de impactos sin envolverla.
     if "impactos" not in out and all(k in out for k in ("ticker", "cita")):
         out = {"impactos": [bruto]}
 
@@ -213,27 +220,15 @@ def normalizar(bruto: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Validación IMPACTO POR IMPACTO.
-#
-# Antes se validaba el objeto entero con `Extraccion.model_validate()`, y
-# Pydantic es todo-o-nada: un `canal` fuera del enum en el tercer impacto
-# invalidaba los otros dos, aunque estuvieran perfectos.
-#
-# El 2026-08-28 eso descartó el discurso de Jackson Hole entero —el documento
-# más relevante del lote— por un solo campo, y se perdieron 4 de 13 impactos
-# propuestos sin que ninguno fuera falso: solo mal etiquetado.
-#
-# Un documento no es una unidad de verdad. Es una lista de afirmaciones
-# independientes, y cada una se acepta o se rechaza por su cuenta.
+# Validación impacto a impacto. Pydantic es todo o nada sobre el objeto
+# completo, así que un `canal` mal etiquetado en el tercer impacto tumbaba
+# los dos primeros. Un documento no es una unidad de verdad: es una lista de
+# afirmaciones independientes.
 # ---------------------------------------------------------------------------
 def _motivo(exc: ValidationError, crudo: dict) -> str:
     """
-    Describe el fallo CON EL VALOR que lo causó.
-
-    Sin el valor, un rechazo por enum es un callejón sin salida: no se sabe
-    si el modelo escribió una barbaridad o un sinónimo razonable que solo
-    falta en `_ALIAS_VALOR`. Con el valor delante, la decisión es de un
-    vistazo.
+    Describe el fallo con el valor que lo causó. Sin él no se distingue una
+    barbaridad de un sinónimo que solo falta en `_ALIAS_VALOR`.
     """
     partes = []
     for e in exc.errors()[:3]:
@@ -247,11 +242,8 @@ def _motivo(exc: ValidationError, crudo: dict) -> str:
 
 def validar_por_partes(bruto: dict) -> tuple[Extraccion, list[str]]:
     """
-    Valida el envoltorio y CADA impacto por separado.
-
-    Devuelve la extracción con los impactos que sobrevivieron y la lista de
-    motivos de los que no. Nunca lanza: un documento mal formado devuelve
-    una extracción vacía, no una excepción que se lleve por delante el resto.
+    Valida el envoltorio y cada impacto por separado. Devuelve los que
+    sobrevivieron y los motivos de los que no. Nunca lanza.
     """
     datos = normalizar(bruto)
     crudos = [c for c in (datos.pop("impactos", None) or []) if isinstance(c, dict)]
@@ -259,7 +251,7 @@ def validar_por_partes(bruto: dict) -> tuple[Extraccion, list[str]]:
     try:
         ext = Extraccion.model_validate({**datos, "impactos": []})
     except ValidationError:
-        # Ni el envoltorio vale. Se conserva lo mínimo para poder seguir
+        # Ni el envoltorio vale: se conserva lo mínimo para seguir
         # examinando los impactos, que es donde está el contenido.
         ext = Extraccion(resumen=str(datos.get("resumen") or "")[:600],
                          es_relevante=bool(crudos), impactos=[])
@@ -278,44 +270,23 @@ def validar_por_partes(bruto: dict) -> tuple[Extraccion, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Detector de abanico: ¿esto es análisis o es rellenar una tabla?
+# Detectores de relleno
 # ---------------------------------------------------------------------------
-# Un documento PUEDE afectar de verdad a varios activos —una decisión de tipos
-# mueve medio mercado— y en ese caso los factores salen distintos, porque cada
-# activo tiene su propia exposición. Lo que delata el relleno no es que haya
-# muchos impactos: es que sean una escalera.
-#
-# El detector anterior exigía valores IDÉNTICOS (`len(firmas) == 1`) y por eso
-# no saltó nunca. El modelo no copia y pega, gradúa. El 2026-08-28 un titular
-# del FT sobre bonos convertibles produjo NVDA x1.15/20d, AAPL x1.12/30d,
-# MSFT x1.18/40d, ^NDX x1.14/25d y ^GSPC x1.13/35d: cinco activos, un canal,
-# ninguna cola y todos los factores dentro de 0,06. Pasó entero.
-#
-# Lo que se mide ahora es la DISPERSIÓN, no la igualdad.
+# Un documento puede tocar de verdad a varios activos (una decisión de tipos
+# mueve medio mercado) y entonces los factores salen distintos, porque cada
+# activo tiene su exposición. Lo que delata el relleno es la escalera: mismo
+# canal, misma cola y factores casi iguales. Por eso se mide la dispersión y
+# no la igualdad, que es lo que hacía el detector anterior sin saltar nunca.
 ABANICO_MIN = 3
 ABANICO_DISPERSION = 0.10
 
-# Un titular no es un documento. El FT entra como nivel 3 y llega sin cuerpo:
-# la cita se verifica contra ~80 caracteres, así que "sin cita no hay fila" se
-# cumple trivialmente y deja de ser una garantía. De un titular se sostiene UNA
-# afirmación —la que el titular hace—, no cinco.
+# Un titular no es un documento. El FT llega sin cuerpo, así que la cita se
+# verifica contra unos 150 caracteres y "sin cita no hay fila" se cumple
+# solo: deja de ser una garantía. De ahí se sostiene una afirmación, no
+# cinco, y ni esa con confianza alta. El techo no tira la noticia (un
+# titular sobre el crudo dice algo real) sino que reduce su peso, porque el
+# aporte a la varianza es conf · (factor² − 1).
 MIN_CUERPO_PARA_VARIOS = 600
-
-# Y ni siquiera esa única afirmación puede declararse con confianza alta.
-#
-# La regla de arriba se escribió para un caso concreto: UN titular que
-# produce CINCO impactos. No cubría el que apareció de verdad. El 2026-09-06
-# el petróleo tenía factor 2,26, y nueve de sus trece impactos venían de
-# titulares del FT de menos de 220 caracteres, cada uno de un documento
-# DISTINTO — así que `len(filas) > 1` no se cumplía nunca y ninguno se
-# apartaba. Entre los nueve aportaban el 68 % del ensanchamiento. Sin ellos
-# el factor era 1,53 en vez de 2,26.
-#
-# El arreglo no es tirarlos. «Trump's Iran war sends US diesel prices to
-# record high» dice algo real sobre el crudo. Lo que no puede es sostener
-# `confianza 0.85`. Se le pone techo, y como el aporte a la varianza es
-# `conf · (factor² − 1)`, la contribución baja en proporción sin que la
-# noticia desaparezca del grafo ni de la vista de sinapsis.
 CONF_MAX_TITULAR = 0.35
 
 
@@ -356,15 +327,12 @@ def _normalizar(t: str) -> str:
 
 def verificar_cita(cita: str, documento: str, umbral: float = 0.92) -> bool:
     """
-    ¿Aparece esa frase en el documento?
+    ¿Aparece esa frase en el documento? Coincidencia exacta tras normalizar
+    y, si falla, cobertura de tokens en ventana. El umbral alto tolera un
+    guion o un espacio raro pero no una reescritura.
 
-    Coincidencia exacta tras normalizar, y si falla, cobertura de tokens en
-    ventana: qué fracción de las palabras de la cita aparecen consecutivas
-    en el texto. El umbral alto tolera un guion o un espacio raro pero no
-    una reescritura.
-
-    Esta función es la razón por la que la regla "sin cita no hay fila" es
-    una garantía y no un ruego. El prompt puede pedirlo; esto lo comprueba.
+    Es lo que convierte "sin cita no hay fila" en una garantía y no en un
+    ruego: el prompt puede pedirlo, esto lo comprueba.
     """
     c, d = _normalizar(cita), _normalizar(documento)
     if not c or not d:
@@ -390,22 +358,15 @@ def coherente(imp: Impacto) -> tuple[bool, str]:
     """
     Coherencias internas que un modelo rompe aunque el JSON valide.
 
-    La distinción que importa: unas incoherencias son ERRORES DE FONDO y
-    otras son descuidos de contabilidad. Un factor extremo con confianza
-    baja es una contradicción real sobre el juicio. Pero decir "cola
-    ninguna" y dejar la intensidad en 0.4 es un despiste sobre un campo
-    que en ese caso no significa nada.
-
-    Antes se descartaban ambos por igual y se perdían impactos válidos por
-    un descuido de formato. Ahora los descuidos se CORRIGEN —la función
-    modifica el objeto— y solo se rechaza lo que revela confusión real.
+    Distingue dos cosas. Un factor extremo con confianza baja es una
+    contradicción de fondo y se rechaza. Decir "cola ninguna" y dejar la
+    intensidad en 0,4 es un descuido sobre un campo que ahí no significa
+    nada: se corrige (la función modifica el objeto) en vez de perder un
+    impacto válido por un detalle de formato.
     """
     if imp.cola == Cola.NINGUNA and imp.intensidad_cola > 0.05:
-        # Sin lado preferente, la intensidad no tiene referente. Se anula.
         imp.intensidad_cola = 0.0
     elif imp.cola != Cola.NINGUNA and imp.intensidad_cola < 0.05:
-        # Nombró un lado: eso ya es afirmar asimetría. Se le pone la
-        # intensidad más baja que sigue siendo una afirmación.
         imp.intensidad_cola = 0.20
 
     if imp.factor_incert > 2.0 and imp.confianza < 0.6:

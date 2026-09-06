@@ -1,5 +1,5 @@
 """
-ingestar_datos_abiertos.py — Series desde datos.gov.co (Socrata).
+ingestar_datos_abiertos.py: Series desde datos.gov.co (Socrata).
 
 CORRECCIÓN (2026-08-28). Este archivo nació de un diagnóstico equivocado.
 Decía que el SDMX de Banrep no publicaba el año en curso, y no era cierto: sí
@@ -14,7 +14,7 @@ series colombianas es sano: el día que Banrep cambie algo, se nota comparando.
 
     IBR   ev8i-uzwt   NO SIRVE. Devuelve HTTP 403 «no row or column access to
                       non-tabular tables»: es una página de presentación, no
-                      un dataset consultable. No perder tiempo con él — el
+                      un dataset consultable. No perder tiempo con él: el
                       IBR estaba completo en el SDMX desde el principio.
 
 Uso:

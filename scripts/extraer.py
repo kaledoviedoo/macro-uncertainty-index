@@ -1,36 +1,36 @@
 """
-extraer.py — Fase 5. El lote nocturno de sinapsis.
+extraer.py (lote nocturno de extracción con LLM)
 
-Lee las noticias pendientes, le pide al LLM la deformación de la
-distribución de cada activo, y escribe en `impactos` solo lo que sobrevive
-a tres filtros mecánicos.
+Lee las noticias pendientes, le pide al modelo la deformación que provocan
+sobre la distribución de cada activo, y escribe en `impactos` solo lo que
+sobrevive a los filtros de `modelos.py`.
 
-Por qué en lote y de noche (H-01 de la auditoría): Groq gratuito da 8.000
-tokens por minuto. Un solo prompt con una noticia y la lista de activos
-consume buena parte de ese minuto. Poner esto en la ruta de la búsqueda del
-usuario significaría 5-10 segundos de espera y la cuota agotada en una
-tarde. El dashboard solo lee SQL.
+Corre en lote y de noche por la cuota: Groq gratuito da 8.000 tokens por
+minuto y cada llamada ronda los 2.700 entre entrada y salida, así que salen
+unas tres por minuto. Ponerlo en la ruta del usuario agotaría la cuota en
+una tarde; el dashboard solo lee SQL.
 
 Los filtros, en orden:
 
-  1. PYDANTIC, IMPACTO A IMPACTO. Si una fila no encaja en el esquema, se
-     cae ella sola. Antes se validaba el documento entero y un solo campo
-     mal etiquetado se llevaba por delante a sus vecinos sanos.
-  2. COHERENCIA. Reglas que un modelo rompe aunque el JSON valide:
-     cola 'ninguna' con intensidad, factor 1.0 que no aporta nada.
-  3. LA CITA. Se comprueba que la frase aparece LITERALMENTE en el
-     documento. Este es el filtro que importa: un LLM inventa una cita
-     con la misma fluidez con la que inventa un análisis, y comprobarlo
-     es un `in` de Python, no una pregunta al modelo.
-  4. ABANICO Y TITULAR. Los tres anteriores miran cada fila por separado y
-     por eso no ven el patrón: cinco activos distintos, un solo canal y los
-     factores en escalera. Eso no es análisis, es rellenar una tabla; y un
-     titular sin cuerpo no sostiene cinco afirmaciones. Estas filas NO se
-     borran: se marcan y se apartan de la predicción, porque hay que
-     conservarlas para poder medir si de verdad aciertan menos.
+  1. Esquema, impacto a impacto. Una fila que no encaja se cae ella sola,
+     sin llevarse por delante a sus vecinas.
+  2. Coherencia interna, que corrige descuidos y rechaza contradicciones.
+  3. La cita, comprobada literalmente contra el documento. Es el filtro que
+     importa: un LLM inventa una cita con la misma fluidez con la que
+     inventa un análisis, y verificarlo es un `in` de Python.
+  4. Techo de confianza a los documentos sin cuerpo.
+  5. El patrón del documento (abanico), que los tres primeros no ven porque
+     miran cada fila por separado. Estas filas se marcan en vez de
+     borrarse: se apartan del pronóstico pero quedan para poder medir
+     después si apartarlas fue correcto.
+
+El modelo se descubre en tiempo de ejecución preguntando a la API qué
+ofrece la cuenta, porque los catálogos de la capa gratuita cambian sin
+aviso y un nombre escrito a mano caduca.
 
     python scripts/extraer.py --limite 20
-    python scripts/extraer.py --limite 5 --seco     # sin escribir
+    python scripts/extraer.py --limite 5 --seco
+    python scripts/extraer.py --modelos
 """
 
 from __future__ import annotations
@@ -49,27 +49,16 @@ import requests
 
 from comun import RAIZ, TIPOS_OBJETIVO, cargar_entorno, conectar, log
 from modelos import (MIN_CUERPO_PARA_VARIOS, coherente, detectar_abanico,
-                     techo_de_titular,
-                     validar_por_partes, verificar_cita)
+                     techo_de_titular, validar_por_partes, verificar_cita)
 from prompts import PROMPT_VER, construir
 
-# Límites de la capa gratuita, respetados por diseño y no por suerte.
-#
-# La cuenta: el sistema son ~1.060 tokens y el usuario llega a ~1.600 con un
-# documento largo, así que cada llamada ronda los 2.700 entre entrada y
-# salida. Groq da 8.000 tokens por MINUTO, no por petición: eso son unas 3
-# llamadas por minuto. El cuello de botella no es el límite de 30 peticiones
-# por minuto, es el de tokens, y por eso la pausa es de 20 segundos y no de 2.
-#
-# 20 noticias tardan unos 7 minutos. Es un lote nocturno: da igual.
+# El cuello de botella son los tokens por minuto, no las peticiones por
+# minuto, y por eso la pausa es de 20 segundos y no de 2.
 PAUSA_ENTRE_LLAMADAS = 20.0
 MAX_REINTENTOS = 3
 
 
-# ---------------------------------------------------------------------------
-# Orden de preferencia. Se usa el primero que la cuenta tenga disponible,
-# porque los catálogos de la capa gratuita cambian sin aviso y un nombre
-# de modelo escrito a mano caduca.
+# Orden de preferencia; se usa el primero que la cuenta tenga disponible.
 PREFERIDOS_GROQ = [
     "llama-3.3-70b-versatile",
     "openai/gpt-oss-120b",
@@ -96,21 +85,18 @@ def modelos_groq(clave: str) -> list[str]:
 
 def proveedor(verboso: bool = False) -> tuple[str, str, str]:
     """
-    Elige proveedor y modelo. (nombre, url, modelo)
+    Elige proveedor y modelo: (nombre, url, modelo).
 
-    Antes esto devolvía un nombre de modelo fijo y, si la cuenta no lo
-    tenía, Groq respondía 404 — un error que parece de URL y es de
-    catálogo. Ahora se pregunta a la API qué hay disponible y se elige de
-    una lista de preferencia. Si nada encaja, se cae a Gemini.
+    Pregunta a la API qué ofrece la cuenta en vez de fijar un nombre. Con
+    un nombre fijo, una cuenta sin ese modelo recibe un 404 que parece de
+    URL y es de catálogo. Si nada encaja, cae a Gemini.
     """
     global _RESUELTO
     if _RESUELTO and not verboso:
         return _RESUELTO
 
-    # Cargar el entorno AQUÍ y no confiar en que otro lo haya hecho. Antes
-    # solo lo cargaba conectar(), así que `--modelos` —que no toca la base
-    # de datos— se ejecutaba sin variables y juraba que no había claves.
-    # En CI no hay .env y las claves llegan como variables de entorno.
+    # Aquí y no solo en conectar(), porque `--modelos` no toca la base y
+    # necesita las claves igual.
     cargar_entorno()
 
     def limpia(nombre: str) -> str:
@@ -188,8 +174,6 @@ def llamar(sistema: str, usuario: str) -> dict | None:
                     time.sleep(espera + 1)
                     continue
                 if r.status_code >= 400:
-                    # El cuerpo dice QUÉ falló. Tragárselo y mostrar solo el
-                    # código convierte un problema de catálogo en un misterio.
                     print(f"      HTTP {r.status_code}: {r.text[:220]}")
                     if r.status_code in (401, 403, 404):
                         return None      # reintentar no lo va a arreglar
@@ -234,14 +218,6 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
         log(sb, "extraer", None, False, error=f"noticia {noticia['id']}: sin respuesta")
         return cuenta
 
-    # Se traducen los sinónimos ANTES de validar. Un modelo que devuelve
-    # `impacts` en vez de `impactos` no está equivocándose en el contenido,
-    # solo en el idioma del campo. Lo sustantivo se sigue validando igual.
-    #
-    # Cada impacto se valida solo. Un `canal` fuera del enum tumba SU fila,
-    # no las de al lado. Y el motivo se imprime con el valor que lo causó,
-    # que es lo que permite distinguir una barbaridad de un sinónimo que
-    # solo falta en el mapa de alias.
     ext, rechazos = validar_por_partes(bruto)
     for r in rechazos:
         print(f"      esquema: {r}")
@@ -266,10 +242,9 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
             cuenta["esquema"] += 1
             continue
 
-        # El techo va ANTES de `coherente()`, que rechaza factor alto con
-        # confianza baja. Si se aplicara después, un titular con factor 2,2
-        # pasaría el control declarando 0,90 y acabaría escrito con 0,35:
-        # el filtro habría juzgado una afirmación distinta de la guardada.
+        # Antes de `coherente()`, que rechaza factor alto con confianza
+        # baja: al revés, el filtro juzgaría una afirmación distinta de la
+        # que se acaba guardando.
         conf_original = imp.confianza
         imp.confianza, recortada = techo_de_titular(imp.confianza, len(documento))
         if recortada:
@@ -293,13 +268,6 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
             "cola": imp.cola.value,
             "intensidad_cola": round(imp.intensidad_cola, 3),
             "cita": imp.cita, "cita_verificada": True,
-            # El razonamiento se pedía en el prompt y se validaba en el
-            # esquema —con su límite de 400 caracteres— pero NO se escribía.
-            # El campo dice literalmente "se muestra al usuario en la
-            # Terminal de Sinapsis" y no había nada que mostrar: el paso de
-            # la cita al activo se generaba cada noche y se perdía.
-            # Es la mitad explicativa del grafo. Sin ella, un factor de 1,66
-            # es un número que hay que creerse.
             "razonamiento": imp.razonamiento,
             "salto": 0 if imp.confianza >= 0.8 else 1,
             "confianza": round(imp.confianza, 3),
@@ -312,15 +280,8 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
               f"{imp.canal.value:<18} {imp.horizonte_d:>3}d  "
               f"conf {imp.confianza:.2f}{aviso}")
 
-    # -----------------------------------------------------------------
-    # Filtro 4: el patrón del documento, no la fila.
-    #
-    # Marcar en vez de borrar es deliberado. Si se borran, la sospecha se
-    # vuelve indemostrable: nunca sabríamos si estas filas acertaban. Al
-    # marcarlas se quedan en la base para el marcador y, mientras tanto,
-    # `predecir.py` las ignora — no ensanchan ninguna distribución hasta
-    # que los datos digan que se lo han ganado.
-    # -----------------------------------------------------------------
+    # El patrón del documento, no la fila. Se marcan en vez de borrarse:
+    # si se borran, la sospecha se vuelve indemostrable.
     for f in filas:
         f["long_documento"] = len(documento)
         f["lote_uniforme"] = False
@@ -328,16 +289,13 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
     es_abanico, detalle = detectar_abanico(filas)
 
     if es_abanico:
-        # Todo el grupo cae: si el patrón es de relleno, ninguna de sus
-        # filas merece más crédito que las otras. Elegir una sería fingir
-        # un criterio que el detector no tiene.
+        # Cae el grupo entero: elegir una fila sería fingir un criterio que
+        # el detector no tiene.
         apartar, motivo = filas, f"abanico · {detalle}"
 
     elif len(documento) < MIN_CUERPO_PARA_VARIOS and len(filas) > 1:
-        # Un titular sin cuerpo no sostiene varias afirmaciones. Se conserva
-        # la de mayor confianza —la propia jerarquía del modelo— y el resto
-        # se aparta. No es una regla sobre la verdad de cada fila, es sobre
-        # cuánta evidencia cabe en ochenta caracteres.
+        # Un titular no sostiene varias afirmaciones. Se conserva la de
+        # mayor confianza y el resto se aparta.
         filas.sort(key=lambda f: f["confianza"], reverse=True)
         apartar = filas[1:]
         motivo = (f"titular de {len(documento)} car. con {len(filas)} "
@@ -391,9 +349,8 @@ def main() -> None:
     sb = conectar()
     prov, _, modelo = proveedor()
 
-    # Solo los activos que el motor PREDICE. Antes se le pasaba el universo
-    # entero y el modelo gastaba cuota atribuyendo impactos a ^VIX y ^TNX,
-    # que estan excluidos del marcador: 19 de 83 impactos el 2026-09-06.
+    # Solo los activos que se predicen: pasar el universo entero gastaba
+    # cuota en ^VIX y ^TNX, que están excluidos del marcador.
     activos = (sb.table("activos").select("ticker,nombre,tipo,region")
                .eq("activo", True).eq("verificado", True)
                .in_("tipo", list(TIPOS_OBJETIVO)).execute().data)
