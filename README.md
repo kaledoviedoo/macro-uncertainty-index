@@ -26,7 +26,10 @@ flowchart LR
 
 La secuencia completa corre sola de lunes a viernes en GitHub Actions y tarda unos 10 minutos.
 
-> Captura de la Terminal: pendiente. Se genera con `.\motor.ps1 app`.
+<img width="1919" height="953" alt="image" src="https://github.com/user-attachments/assets/26547703-1c7b-4c6a-b211-83ecbcf4d589" />
+<img width="1916" height="960" alt="image" src="https://github.com/user-attachments/assets/add0f767-744b-44d4-af84-b4b776ec687b" />
+
+
 
 ---
 
