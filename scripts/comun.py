@@ -19,6 +19,19 @@ from supabase import Client, create_client
 
 RAIZ = Path(__file__).resolve().parent.parent
 
+# Los activos sobre los que el motor PREDICE. Las tasas y el VIX son
+# variables explicativas del modelo, no objetivos: preguntar por una "caída
+# del 3 %" en el VIX —que se mueve un 5 % en un día tranquilo— no describe
+# ningún evento.
+#
+# Vive aquí, y no dentro de `predecir.py`, porque `extraer.py` también lo
+# necesita. Al estar solo en el emisor, el extractor seguía pidiéndole al LLM
+# que analizara ^VIX y ^TNX: el 2026-09-06 había 19 impactos de 83 —casi una
+# cuarta parte de la cuota de Groq— atribuidos a activos que nunca se
+# predicen. Una constante duplicada a medias es peor que duplicada entera:
+# parece que hay un criterio y solo lo aplica la mitad del sistema.
+TIPOS_OBJETIVO = ("accion", "indice", "etf", "materia_prima", "divisa")
+
 # No hay un User-Agent que sirva para todas las fuentes. Las agencias
 # estadísticas de EE.UU. quieren un identificador honesto con contacto;
 # los WAF comerciales solo hablan con navegadores. El verificador prueba

@@ -47,8 +47,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import requests
 
-from comun import RAIZ, cargar_entorno, conectar, log
+from comun import RAIZ, TIPOS_OBJETIVO, cargar_entorno, conectar, log
 from modelos import (MIN_CUERPO_PARA_VARIOS, coherente, detectar_abanico,
+                     techo_de_titular,
                      validar_por_partes, verificar_cita)
 from prompts import PROMPT_VER, construir
 
@@ -225,7 +226,7 @@ def llamar(sistema: str, usuario: str) -> dict | None:
 def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
     """Devuelve un recuento de lo que pasó con esta noticia."""
     cuenta = {"propuestos": 0, "esquema": 0, "coherencia": 0, "cita": 0,
-              "apartados": 0, "escritos": 0}
+              "techo": 0, "apartados": 0, "escritos": 0}
 
     sistema, usuario = construir(activos, noticia)
     bruto = llamar(sistema, usuario)
@@ -265,6 +266,15 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
             cuenta["esquema"] += 1
             continue
 
+        # El techo va ANTES de `coherente()`, que rechaza factor alto con
+        # confianza baja. Si se aplicara después, un titular con factor 2,2
+        # pasaría el control declarando 0,90 y acabaría escrito con 0,35:
+        # el filtro habría juzgado una afirmación distinta de la guardada.
+        conf_original = imp.confianza
+        imp.confianza, recortada = techo_de_titular(imp.confianza, len(documento))
+        if recortada:
+            cuenta["techo"] += 1
+
         ok, motivo = coherente(imp)
         if not ok:
             print(f"      {imp.ticker}: {motivo}")
@@ -283,13 +293,24 @@ def procesar(sb, noticia: dict, activos: list[dict], seco: bool) -> dict:
             "cola": imp.cola.value,
             "intensidad_cola": round(imp.intensidad_cola, 3),
             "cita": imp.cita, "cita_verificada": True,
+            # El razonamiento se pedía en el prompt y se validaba en el
+            # esquema —con su límite de 400 caracteres— pero NO se escribía.
+            # El campo dice literalmente "se muestra al usuario en la
+            # Terminal de Sinapsis" y no había nada que mostrar: el paso de
+            # la cita al activo se generaba cada noche y se perdía.
+            # Es la mitad explicativa del grafo. Sin ella, un factor de 1,66
+            # es un número que hay que creerse.
+            "razonamiento": imp.razonamiento,
             "salto": 0 if imp.confianza >= 0.8 else 1,
             "confianza": round(imp.confianza, 3),
             "modelo": proveedor()[2], "prompt_ver": PROMPT_VER,
         })
         flecha = {"izquierda": "↓", "derecha": "↑", "ninguna": "="}[imp.cola.value]
+        aviso = (f"  [titular de {len(documento)} car.: conf recortada "
+                 f"de {conf_original:.2f}]" if recortada else "")
         print(f"      {imp.ticker:<11} x{imp.factor_incert:.2f} {flecha} "
-              f"{imp.canal.value:<18} {imp.horizonte_d:>3}d  conf {imp.confianza:.2f}")
+              f"{imp.canal.value:<18} {imp.horizonte_d:>3}d  "
+              f"conf {imp.confianza:.2f}{aviso}")
 
     # -----------------------------------------------------------------
     # Filtro 4: el patrón del documento, no la fila.
@@ -370,8 +391,12 @@ def main() -> None:
     sb = conectar()
     prov, _, modelo = proveedor()
 
+    # Solo los activos que el motor PREDICE. Antes se le pasaba el universo
+    # entero y el modelo gastaba cuota atribuyendo impactos a ^VIX y ^TNX,
+    # que estan excluidos del marcador: 19 de 83 impactos el 2026-09-06.
     activos = (sb.table("activos").select("ticker,nombre,tipo,region")
-               .eq("activo", True).eq("verificado", True).execute().data)
+               .eq("activo", True).eq("verificado", True)
+               .in_("tipo", list(TIPOS_OBJETIVO)).execute().data)
 
     q = (sb.table("noticias")
          .select("id,titular,cuerpo,publicado_en,fuente_id,es_primaria")
@@ -394,7 +419,7 @@ def main() -> None:
     print(f"{'='*72}")
 
     tot = {"propuestos": 0, "esquema": 0, "coherencia": 0, "cita": 0,
-           "apartados": 0, "escritos": 0}
+           "techo": 0, "apartados": 0, "escritos": 0}
     for i, n in enumerate(noticias, 1):
         f = fuentes.get(n["fuente_id"], {})
         n["fuente_nombre"] = f.get("nombre", "?")
@@ -413,6 +438,8 @@ def main() -> None:
     print(f"  Rechazados por incoherencia         {tot['coherencia']:>4}")
     print(f"  RECHAZADOS POR CITA INVENTADA       {tot['cita']:>4}")
     print(f"  Escritos en la base                 {tot['escritos']:>4}")
+    print(f"    con confianza recortada           {tot['techo']:>4}"
+          f"   (titular sin cuerpo)")
     print(f"    de ellos, apartados por relleno   {tot['apartados']:>4}"
           f"   (guardados, fuera de la predicción)")
 

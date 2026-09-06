@@ -37,10 +37,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np
 import pandas as pd
 from calendario import factores_por_dia
-from comun import conectar, leer_todo, log, upsert
+from comun import TIPOS_OBJETIVO, conectar, leer_todo, log, upsert
 from pronostico import matriz_transicion, prob_caida, proyectar, retornos
 
 MODELO = "motor-v1"
+
+# Cuánto pesa el segundo, tercer y cuarto aviso que llegan a un activo por el
+# mismo canal. El primero cuenta entero. Ver la nota larga en `ajuste_llm`:
+# varias noticias sobre el mismo mecanismo no son riesgos independientes, y
+# sumarlas enteras en varianza infla el cono.
+#
+# 1/3 es una elección razonada, no medida. Cuando el marcador tenga sucesos
+# suficientes se podrá calibrar comparando el acierto a distintos valores.
+PESO_CORRELADO = 0.33
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +61,10 @@ def ajuste_llm(sb, ticker: str, horizonte: int) -> tuple[float, float, int]:
     VARIANZA, no multiplicándose: dos avisos de 1,3 dan 1,41 y no 1,69,
     porque riesgos independientes se suman en varianza. Sin eso, cinco
     noticias mediocres producirían un factor absurdo.
+
+    Pero solo los INDEPENDIENTES se suman enteros. Los que llegan por el
+    mismo canal describen el mismo mecanismo y llevan descuento — ver la
+    nota dentro de la función.
 
     sesgo: hacia qué lado engorda la cola, de −1 a +1.
 
@@ -66,7 +79,8 @@ def ajuste_llm(sb, ticker: str, horizonte: int) -> tuple[float, float, int]:
     no hacen es mover un pronóstico mientras tanto.
     """
     filas = (sb.table("impactos")
-             .select("factor_incert,cola,intensidad_cola,confianza,horizonte_d,creado_en")
+             .select("factor_incert,cola,intensidad_cola,confianza,"
+                     "horizonte_d,creado_en,canal")
              .eq("ticker", ticker).eq("cita_verificada", True)
              # `is.null` va incluido a propósito: las filas escritas antes de
              # que existiera la columna la tienen a NULL, y en SQL
@@ -80,14 +94,45 @@ def ajuste_llm(sb, ticker: str, horizonte: int) -> tuple[float, float, int]:
     if not filas:
         return 1.0, 0.0, 0
 
-    exceso, sesgo, peso_total = 0.0, 0.0, 0.0
+    # DESCUENTO POR CORRELACIÓN.
+    #
+    # Sumar en varianza es correcto para riesgos INDEPENDIENTES, y hasta hoy
+    # se sumaba todo como si lo fuera. No lo es. El 2026-09-06 el petróleo
+    # tenía cuatro impactos del canal `oferta` que eran la misma historia
+    # —el acuerdo de Venezuela— contada por cuatro titulares distintos del
+    # FT en días distintos:
+    #
+    #     0.587  «take control of 65bn barrels of Venezuelan oil»
+    #     0.274  «Chevron to double Venezuela oil production»
+    #     0.193  «Trump's new state capitalism»
+    #     0.161  «Trump-linked companies race to secure deals»
+    #
+    # Aportaban 1,215 juntos, como si fueran cuatro riesgos separados. Son
+    # uno contado cuatro veces, y el motor lo leía como cuatro.
+    #
+    # No hay forma barata de saber si dos noticias son la misma historia,
+    # pero sí una aproximación honesta: si dos impactos llegan al MISMO
+    # activo por el MISMO canal, describen el mismo mecanismo. Dentro de
+    # cada canal el mayor cuenta entero y el resto a un tercio. No es una
+    # constante medida —haría falta el marcador para calibrarla— y por eso
+    # se declara arriba con nombre, para poder moverla cuando haya datos.
+    por_canal: dict[str, list[tuple[float, float, float]]] = {}
+    sesgo, peso_total = 0.0, 0.0
+
     for f in filas:
         conf = float(f.get("confianza") or 0.5)
         fac = float(f["factor_incert"])
-        exceso += conf * max(0.0, fac ** 2 - 1)
+        aporte = conf * max(0.0, fac ** 2 - 1)
+        por_canal.setdefault(f.get("canal") or "?", []).append(aporte)
+
         signo = {"izquierda": -1.0, "derecha": 1.0}.get(f["cola"], 0.0)
         sesgo += conf * signo * float(f.get("intensidad_cola") or 0)
         peso_total += conf
+
+    exceso = 0.0
+    for aportes in por_canal.values():
+        aportes.sort(reverse=True)
+        exceso += aportes[0] + PESO_CORRELADO * sum(aportes[1:])
 
     factor = float(np.clip(np.sqrt(1 + exceso), 1.0, 2.5))
     sesgo_n = float(np.clip(sesgo / peso_total, -1, 1)) if peso_total else 0.0
@@ -176,12 +221,9 @@ def main() -> None:
     P = matriz_transicion(reg_serie)
     marca_vix, prob_vix = senal_vix(reg)
 
-    # Solo activos de PRECIO. Las tasas y el VIX son variables explicativas
-    # del modelo, no objetivos: preguntar por una "caída del 3 %" en el VIX
-    # —que se mueve un 5 % en un día tranquilo— o en el rendimiento del
-    # bono a 10 años no describe ningún evento. Meterlos en el marcador
-    # sería promediar aciertos sobre preguntas que no significan lo mismo.
-    TIPOS_OBJETIVO = ("accion", "indice", "etf", "materia_prima", "divisa")
+    # Solo activos de PRECIO. La lista vive en `comun.py` porque `extraer.py`
+    # necesita la misma: mientras estuvo aquí, el extractor gastaba cuota
+    # analizando ^VIX y ^TNX, que nunca llegan al marcador.
     activos = (sb.table("activos").select("ticker,nombre,tipo,frecuencia")
                .eq("activo", True).eq("verificado", True)
                .eq("frecuencia", "diaria")

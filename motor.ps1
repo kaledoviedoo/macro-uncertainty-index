@@ -63,6 +63,7 @@ $comandos = [ordered]@{
     "predecir"   = @{ s = "scripts\predecir.py";                a = @();                 d = "FASE 6: emite las predicciones fechadas de hoy" }
     "resolver"   = @{ s = "scripts\resolver.py";                a = @();                 d = "FASE 6: cobra las vencidas y muestra el marcador" }
     "marcador"   = @{ s = "scripts\resolver.py";                a = @("--marcador");     d = "Solo el marcador, sin resolver nada" }
+    "sinapsis"   = @{ s = "scripts\sinapsis.py";                a = @();                 d = "El grafo causal vigente, con cita y aritmetica" }
 }
 
 if (-not $Comando -or -not $comandos.Contains($Comando)) {

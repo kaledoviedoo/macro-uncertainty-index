@@ -301,6 +301,30 @@ ABANICO_DISPERSION = 0.10
 # afirmación —la que el titular hace—, no cinco.
 MIN_CUERPO_PARA_VARIOS = 600
 
+# Y ni siquiera esa única afirmación puede declararse con confianza alta.
+#
+# La regla de arriba se escribió para un caso concreto: UN titular que
+# produce CINCO impactos. No cubría el que apareció de verdad. El 2026-09-06
+# el petróleo tenía factor 2,26, y nueve de sus trece impactos venían de
+# titulares del FT de menos de 220 caracteres, cada uno de un documento
+# DISTINTO — así que `len(filas) > 1` no se cumplía nunca y ninguno se
+# apartaba. Entre los nueve aportaban el 68 % del ensanchamiento. Sin ellos
+# el factor era 1,53 en vez de 2,26.
+#
+# El arreglo no es tirarlos. «Trump's Iran war sends US diesel prices to
+# record high» dice algo real sobre el crudo. Lo que no puede es sostener
+# `confianza 0.85`. Se le pone techo, y como el aporte a la varianza es
+# `conf · (factor² − 1)`, la contribución baja en proporción sin que la
+# noticia desaparezca del grafo ni de la vista de sinapsis.
+CONF_MAX_TITULAR = 0.35
+
+
+def techo_de_titular(confianza: float, largo_doc: int) -> tuple[float, bool]:
+    """Confianza aplicable y si hubo recorte. Un titular no afirma con fuerza."""
+    if largo_doc >= MIN_CUERPO_PARA_VARIOS or confianza <= CONF_MAX_TITULAR:
+        return confianza, False
+    return CONF_MAX_TITULAR, True
+
 
 def detectar_abanico(filas: list[dict]) -> tuple[bool, str]:
     """¿Mismo canal, misma cola y factores casi iguales? Entonces es relleno."""
